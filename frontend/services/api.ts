@@ -3,10 +3,10 @@
  * Change API_BASE to your backend server's address.
  */
 
-// Dev tunnel URL for the backend
-export const API_BASE = "https://l62bjdmv-8000.inc1.devtunnels.ms";
-export const WS_URL = "wss://l62bjdmv-8000.inc1.devtunnels.ms/stream";
-export const VOICE_WS_URL = "wss://l62bjdmv-8000.inc1.devtunnels.ms/voice/stream";
+// Active ngrok tunnel — update this when ngrok URL changes
+export const API_BASE = "https://fluent-supersecularly-jefferson.ngrok-free.dev";
+export const WS_URL = "wss://fluent-supersecularly-jefferson.ngrok-free.dev/stream";
+export const VOICE_WS_URL = "wss://fluent-supersecularly-jefferson.ngrok-free.dev/voice/stream";
 
 export type Mode = "medical" | "retail";
 
@@ -40,6 +40,7 @@ export interface HealthStatus {
   llm_provider: string;
   tts_provider: string;
   stt_provider: string;
+  detection_enabled: boolean;
   detector_stats?: Record<string, any>;
 }
 
@@ -65,6 +66,15 @@ class VisionAPI {
   private async safeFetch(url: string, init?: RequestInit): Promise<Response> {
     const start = Date.now();
     console.log(`[API] → ${init?.method || "GET"} ${url}`);
+
+    // Required to bypass ngrok browser warning interstitial page
+    init = {
+      ...init,
+      headers: {
+        "ngrok-skip-browser-warning": "true",
+        ...(init?.headers ?? {}),
+      },
+    };
 
     try {
       const res = await fetch(url, init);
@@ -207,6 +217,19 @@ class VisionAPI {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ question }),
+    });
+    return res.json();
+  }
+
+  /**
+   * Toggle YOLO detection on/off at runtime.
+   * When disabled: frame → Gemini Vision directly (no YOLO gate).
+   */
+  async toggleDetection(enabled: boolean): Promise<any> {
+    const res = await this.safeFetch(`${this.base}/config/detection`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ enabled }),
     });
     return res.json();
   }

@@ -2,6 +2,8 @@
 .DS_Store
 Thumbs.db
 
+__pycache__/
+
 # Node.js
 node_modules/
 npm-debug.log

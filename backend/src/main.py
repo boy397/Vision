@@ -90,6 +90,10 @@ class TTSProviderRequest(BaseModel):
     provider: str
 
 
+class DetectionToggleRequest(BaseModel):
+    enabled: bool
+
+
 # ── REST Endpoints ──
 
 @app.get("/health")
@@ -103,6 +107,7 @@ async def health():
         "llm_provider": config.get_active_llm_provider(),
         "tts_provider": config.tts.provider,
         "stt_provider": config.stt.provider,
+        "detection_enabled": config.app.detection_enabled,
         "detector_stats": pipeline.detector.stats,
     }
 
@@ -126,6 +131,24 @@ async def debug_stats():
     if hasattr(pipeline.tts, "stats"):
         stats["tts"] = pipeline.tts.stats
     return stats
+
+
+@app.post("/config/detection")
+async def toggle_detection(req: DetectionToggleRequest):
+    """Enable or disable YOLO detection at runtime.
+
+    When disabled: pic → Gemini Vision directly (no YOLO gate).
+    When enabled: pic → YOLO → (if object found) → Gemini Vision.
+    """
+    config = _get_config()
+    config.toggle_detection(req.enabled)
+    logger.info(f"[/config/detection] Detection {'ENABLED' if req.enabled else 'DISABLED'}")
+    return {
+        "status": "ok",
+        "detection_enabled": req.enabled,
+        "message": f"YOLO detection {'enabled' if req.enabled else 'disabled'} — "
+                   f"frames now go {'YOLO → LLM' if req.enabled else 'directly to LLM'}",
+    }
 
 
 @app.post("/config/mode")

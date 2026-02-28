@@ -67,7 +67,7 @@ stt:
 
 # ── TTS (Text-to-Speech) ──
 tts:
-  provider: "elevenlabs"
+  provider: "sarvam"  # Switch to "elevenlabs" to use ElevenLabs instead
   elevenlabs:
     voice_id: "JBFqnCBsd6RMkjVDRZzb"
     model: "eleven_turbo_v2_5"
@@ -75,9 +75,9 @@ tts:
     similarity_boost: 0.75
     stream: true
   sarvam:
-    model: "bulbul:v2"
-    language: "hi-IN"
-    speaker: "meera"
+    model: "bulbul:v3"
+    language: "en-IN"
+    speaker: "shubh"  # Must be lowercase. v3 speakers: shubh, aditya, ritu, priya, neha, rahul, pooja, rohan, simran, kavya...
 
 # ── Voice Commands ──
 voice:

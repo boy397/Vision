@@ -93,6 +93,7 @@ class AppConfig(BaseModel):
     fps: int = 10
     language: str = "en"
     debug: bool = False
+    detection_enabled: bool = True  # Set False to skip YOLO and go straight to LLM
 
 
 class Config(BaseModel):
@@ -112,6 +113,10 @@ class Config(BaseModel):
     # ── Runtime state (not persisted) ──
     _current_mode: str = "medical"
     _prompts: dict[str, dict] = {}
+
+    def toggle_detection(self, enabled: bool) -> None:
+        """Enable or disable YOLO detection at runtime."""
+        self.app.detection_enabled = enabled
 
     @property
     def current_mode(self) -> str:
