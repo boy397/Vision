@@ -1,0 +1,77 @@
+# Voice Command Definitions
+# Maps phrases → intent actions. Fuzzy matching is applied.
+
+commands:
+  scan:
+    phrases:
+      - "scan this"
+      - "what is this"
+      - "what do I have"
+      - "read this"
+      - "check this"
+      - "identify this"
+    action: "scan"
+    description: "One-shot capture + full Tier 2 analysis"
+
+  start_continuous:
+    phrases:
+      - "start watching"
+      - "keep looking"
+      - "continuous mode"
+      - "start scanning"
+    action: "start_continuous"
+    description: "Enable continuous mode at configured fps"
+
+  stop:
+    phrases:
+      - "stop watching"
+      - "stop"
+      - "pause"
+      - "stop scanning"
+    action: "stop_continuous"
+    description: "Disable continuous mode, return to idle"
+
+  switch_medical:
+    phrases:
+      - "switch to medicine mode"
+      - "switch to medical mode"
+      - "medicine mode"
+      - "medical mode"
+    action: "switch_mode"
+    params:
+      mode: "medical"
+    description: "Switch to medical mode - changes models + prompts"
+
+  switch_retail:
+    phrases:
+      - "switch to retail mode"
+      - "switch to shopping mode"
+      - "retail mode"
+      - "shopping mode"
+    action: "switch_mode"
+    params:
+      mode: "retail"
+    description: "Switch to retail mode - changes models + prompts"
+
+  follow_up:
+    phrases:
+      - "tell me more"
+      - "more details"
+      - "what else"
+      - "explain"
+    action: "follow_up"
+    description: "Send last detection context + question to LLM chat"
+
+  repeat:
+    phrases:
+      - "repeat that"
+      - "say again"
+      - "repeat"
+      - "what did you say"
+    action: "repeat"
+    description: "Replay last TTS output"
+
+# Fuzzy matching settings
+matching:
+  threshold: 0.7        # minimum similarity score (0-1)
+  method: "token_set"   # fuzz method: ratio, partial, token_sort, token_set

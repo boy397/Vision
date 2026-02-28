@@ -1,0 +1,88 @@
+# ── App ──
+app:
+  name: "Vision Assistive System"
+  default_mode: "medical"
+  trigger: "voice"
+  fps: 10
+  language: "en"
+  debug: false
+
+# ── Detection (Tier 1 - defaults, overridden per mode) ──
+detection:
+  model: "yolo26n"
+  confidence: 0.45
+  device: "cuda"
+  input_size: 640
+  quantized: true
+  state_change_threshold: 0.3
+
+# ── Modes (per-mode model + detection overrides) ──
+modes:
+  medical:
+    detection:
+      model: "yolo26n"
+      confidence: 0.40
+      classes: ["pill_bottle", "blister_pack", "medicine_box", "prescription"]
+    llm:
+      provider: "google"
+      model: "gemini-2.0-flash"
+    prompt_file: "prompts/medical.yml"
+  retail:
+    detection:
+      model: "yolo26n"
+      confidence: 0.45
+      classes: ["currency_note", "product_box", "price_tag", "barcode"]
+    llm:
+      provider: "google"
+      model: "gemini-2.0-flash"
+    prompt_file: "prompts/retail.yml"
+
+# ── LLM Provider (Tier 2 Vision + Chat) ──
+llm:
+  provider: "google"
+  google:
+    model: "gemini-2.0-flash"
+    temperature: 0.3
+    max_tokens: 512
+    stream: true
+  azure:
+    model: "gpt-4o"
+    api_version: "2024-12-01-preview"
+    temperature: 0.3
+    max_tokens: 512
+
+# ── STT (Speech-to-Text) ──
+stt:
+  provider: "google"
+  google:
+    model: "latest_long"
+    language: "en-IN"
+  sarvam:
+    model: "saarika:v2"
+    language: "hi-IN"
+
+# ── TTS (Text-to-Speech) ──
+tts:
+  provider: "elevenlabs"
+  elevenlabs:
+    voice_id: "JBFqnCBsd6RMkjVDRZzb"
+    model: "eleven_turbo_v2_5"
+    stability: 0.5
+    similarity_boost: 0.75
+    stream: true
+  sarvam:
+    model: "bulbul:v2"
+    language: "hi-IN"
+    speaker: "meera"
+
+# ── Voice Commands ──
+voice:
+  vad_aggressiveness: 2
+  wake_word_enabled: false
+  silence_timeout_ms: 800
+
+# ── Server ──
+server:
+  host: "0.0.0.0"
+  port: 8000
+  cors_origins: ["*"]
