@@ -1,0 +1,17 @@
+elevenlabs>=2.37.0
+fastapi>=0.134.0
+google-cloud-speech>=2.37.0
+google-genai>=1.65.0
+httpx>=0.28.1
+numpy>=2.4.2
+openai>=2.24.0
+opencv-python-headless>=4.13.0.92
+pillow>=12.1.1
+pydantic>=2.12.5
+python-dotenv>=1.2.1
+python-multipart>=0.0.22
+pyyaml>=6.0.3
+torch>=2.10.0
+ultralytics>=8.4.18
+uvicorn[standard]>=0.41.0
+webrtcvad-wheels>=2.0.10
