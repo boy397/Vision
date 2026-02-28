@@ -1,10 +1,10 @@
-import React, { useState, useRef, useCallback } from 'react';
+import React, { useState, useRef, useCallback, useEffect } from 'react';
 import {
   StyleSheet,
   View,
   Text,
-  TouchableOpacity,
   ScrollView,
+  TouchableOpacity,
   ActivityIndicator,
   SafeAreaView,
 } from 'react-native';
@@ -18,16 +18,18 @@ export default function ScannerScreen() {
   const [latency, setLatency] = useState<number | null>(null);
   const [mode, setMode] = useState<'medical' | 'retail'>('medical');
   const cameraRef = useRef<CameraView>(null);
+  const isScanningRef = useRef(false);
 
   const handleScan = useCallback(async () => {
-    if (!cameraRef.current || scanning) return;
+    if (!cameraRef.current || isScanningRef.current) return;
 
+    isScanningRef.current = true;
     setScanning(true);
     const start = Date.now();
 
     try {
       const photo = await cameraRef.current.takePictureAsync({
-        quality: 0.8,
+        quality: 0.7,
         base64: false,
       });
 
@@ -39,17 +41,23 @@ export default function ScannerScreen() {
       }
     } catch (err) {
       console.error('Scan error:', err);
-      setResult({
-        detections: [],
-        analysis: {},
-        tts_text: 'Connection error — is the backend running?',
-        mode,
-        state_changed: false,
-      });
+      // Don't show persistent error for transient network issues in auto-mode
     } finally {
       setScanning(false);
+      isScanningRef.current = false;
     }
-  }, [scanning, mode]);
+  }, [mode]);
+
+  // Continuous detection loop
+  useEffect(() => {
+    if (!permission?.granted) return;
+
+    const interval = setInterval(() => {
+      handleScan();
+    }, 2000); // Scan every 2 seconds
+
+    return () => clearInterval(interval);
+  }, [permission?.granted, handleScan]);
 
   if (!permission) return <View style={styles.container} />;
 
@@ -78,32 +86,29 @@ export default function ScannerScreen() {
           style={styles.camera}
           facing="back"
         />
+
+        {/* Scanning Indicator */}
         {scanning && (
-          <View style={styles.scanOverlay}>
-            <View style={[styles.scanLine, { backgroundColor: mode === 'medical' ? '#6c5ce7' : '#00cec9' }]} />
+          <View style={styles.scanIndicator}>
+            <ActivityIndicator size="small" color={mode === 'medical' ? '#6c5ce7' : '#00cec9'} />
           </View>
         )}
+
         {/* Mode Badge */}
         <View style={[styles.modeBadge, { backgroundColor: mode === 'medical' ? '#6c5ce722' : '#00cec922' }]}>
           <Text style={styles.modeBadgeText}>
             {mode === 'medical' ? '💊 Medical' : '🛒 Retail'}
           </Text>
         </View>
-      </View>
 
-      {/* Scan Button */}
-      <TouchableOpacity
-        style={[styles.scanBtn, { borderColor: mode === 'medical' ? '#6c5ce7' : '#00cec9' }]}
-        onPress={handleScan}
-        disabled={scanning}
-        activeOpacity={0.7}
-      >
-        {scanning ? (
-          <ActivityIndicator color="#fff" />
-        ) : (
-          <Text style={styles.scanBtnText}>📸 Scan</Text>
-        )}
-      </TouchableOpacity>
+        {/* Live Transcript Overlay */}
+        <View style={styles.transcriptOverlay}>
+          <Text style={styles.transcriptLabel}>LIVE TRANSCRIPT</Text>
+          <Text style={styles.transcriptText} numberOfLines={2}>
+            {result?.tts_text || "Watching for objects..."}
+          </Text>
+        </View>
+      </View>
 
       {/* Results */}
       <ScrollView style={styles.results} contentContainerStyle={styles.resultsContent}>
@@ -115,26 +120,22 @@ export default function ScannerScreen() {
 
         {result ? (
           <>
-            {/* TTS Text */}
-            {result.tts_text ? (
-              <View style={[styles.ttsBox, { borderColor: mode === 'medical' ? '#6c5ce7' : '#00cec9' }]}>
-                <Text style={styles.ttsLabel}>🔊 Response</Text>
-                <Text style={styles.ttsText}>{result.tts_text}</Text>
-              </View>
-            ) : null}
-
             {/* Detections */}
-            {result.detections.map((det: Detection, i: number) => (
-              <View key={i} style={[styles.detectionItem, { borderLeftColor: mode === 'medical' ? '#6c5ce7' : '#00cec9' }]}>
-                <Text style={styles.detLabel}>{det.class_name}</Text>
-                <Text style={styles.detConf}>{(det.confidence * 100).toFixed(1)}%</Text>
+            {result.detections.length > 0 && (
+              <View style={styles.section}>
+                {result.detections.map((det: Detection, i: number) => (
+                  <View key={i} style={[styles.detectionItem, { borderLeftColor: mode === 'medical' ? '#6c5ce7' : '#00cec9' }]}>
+                    <Text style={styles.detLabel}>{det.class_name}</Text>
+                    <Text style={styles.detConf}>{(det.confidence * 100).toFixed(1)}%</Text>
+                  </View>
+                ))}
               </View>
-            ))}
+            )}
 
-            {/* Analysis */}
+            {/* Analysis Detail */}
             {result.analysis && !result.analysis.error && Object.keys(result.analysis).length > 0 && (
               <View style={styles.analysisBox}>
-                <Text style={styles.analysisTitle}>📋 Analysis</Text>
+                <Text style={styles.analysisTitle}>📋 Detailed Analysis</Text>
                 {Object.entries(result.analysis).map(([key, val]) => {
                   if (key === 'confidence' || key === 'raw_text_detected') return null;
                   if (val && typeof val === 'object') {
@@ -158,7 +159,7 @@ export default function ScannerScreen() {
             )}
           </>
         ) : (
-          <Text style={styles.placeholder}>Point camera at a medicine or product and tap Scan</Text>
+          <Text style={styles.placeholder}>Point camera at a medicine or product for automatic detection</Text>
         )}
       </ScrollView>
     </SafeAreaView>
@@ -174,36 +175,39 @@ const styles = StyleSheet.create({
   permissionBtn: { backgroundColor: '#6c5ce7', paddingHorizontal: 32, paddingVertical: 14, borderRadius: 12 },
   permissionBtnText: { color: '#fff', fontSize: 16, fontWeight: '600' },
   // Camera
-  cameraWrap: { height: 280, marginHorizontal: 12, marginTop: 8, borderRadius: 16, overflow: 'hidden', position: 'relative' },
+  cameraWrap: { height: 450, marginHorizontal: 12, marginTop: 8, borderRadius: 24, overflow: 'hidden', position: 'relative', elevation: 10 },
   camera: { flex: 1 },
-  scanOverlay: { ...StyleSheet.absoluteFillObject, justifyContent: 'center' },
-  scanLine: { height: 2, opacity: 0.8 },
+  scanIndicator: { position: 'absolute', top: 12, left: 12, backgroundColor: '#00000088', padding: 8, borderRadius: 20 },
   modeBadge: { position: 'absolute', top: 12, right: 12, paddingHorizontal: 12, paddingVertical: 6, borderRadius: 20 },
   modeBadgeText: { color: '#f0f0f5', fontSize: 13, fontWeight: '600' },
-  // Scan Button
-  scanBtn: {
-    marginHorizontal: 12, marginTop: 12, paddingVertical: 14,
-    backgroundColor: '#1a1a2e', borderRadius: 12, borderWidth: 1.5,
-    alignItems: 'center',
+  // Transcript
+  transcriptOverlay: {
+    position: 'absolute',
+    bottom: 0,
+    left: 0,
+    right: 0,
+    backgroundColor: 'rgba(10, 10, 15, 0.85)',
+    padding: 16,
+    borderTopWidth: 1,
+    borderTopColor: '#ffffff22',
   },
-  scanBtnText: { color: '#f0f0f5', fontSize: 16, fontWeight: '600' },
+  transcriptLabel: { color: '#00cec9', fontSize: 10, fontWeight: '800', marginBottom: 4, letterSpacing: 1 },
+  transcriptText: { color: '#f0f0f5', fontSize: 15, fontWeight: '500', lineHeight: 20 },
   // Results
-  results: { flex: 1, marginTop: 12 },
+  results: { flex: 1, marginTop: 16 },
   resultsContent: { paddingHorizontal: 12, paddingBottom: 20 },
-  latencyBadge: { alignSelf: 'flex-end', backgroundColor: '#12121a', paddingHorizontal: 10, paddingVertical: 3, borderRadius: 8, marginBottom: 8 },
+  latencyBadge: { alignSelf: 'flex-end', backgroundColor: '#12121a', paddingHorizontal: 10, paddingVertical: 3, borderRadius: 8, marginBottom: 12 },
   latencyText: { color: '#55556a', fontSize: 12, fontVariant: ['tabular-nums'] },
   placeholder: { color: '#55556a', textAlign: 'center', marginTop: 32, fontSize: 14 },
-  // TTS Box
-  ttsBox: { backgroundColor: '#12121a', borderRadius: 12, padding: 14, borderLeftWidth: 3, marginBottom: 10 },
-  ttsLabel: { color: '#8888a0', fontSize: 12, fontWeight: '600', marginBottom: 6 },
-  ttsText: { color: '#f0f0f5', fontSize: 15, lineHeight: 22 },
+  section: { marginBottom: 16 },
   // Detection Item
   detectionItem: { backgroundColor: '#12121a', borderRadius: 8, padding: 12, marginBottom: 8, borderLeftWidth: 3, flexDirection: 'row', justifyContent: 'space-between' },
   detLabel: { color: '#f0f0f5', fontWeight: '600', fontSize: 14 },
   detConf: { color: '#00b894', fontSize: 13, fontVariant: ['tabular-nums'] },
   // Analysis
-  analysisBox: { backgroundColor: '#12121a', borderRadius: 12, padding: 14, marginTop: 4 },
-  analysisTitle: { color: '#00b894', fontWeight: '600', fontSize: 13, marginBottom: 8 },
-  analysisLine: { color: '#8888a0', fontSize: 13, lineHeight: 20, marginBottom: 2 },
+  analysisBox: { backgroundColor: '#12121a', borderRadius: 12, padding: 16, marginTop: 4 },
+  analysisTitle: { color: '#6c5ce7', fontWeight: '700', fontSize: 14, marginBottom: 12 },
+  analysisLine: { color: '#8888a0', fontSize: 13, lineHeight: 20, marginBottom: 4 },
   analysisKey: { color: '#f0f0f5', fontWeight: '600' },
 });
+
