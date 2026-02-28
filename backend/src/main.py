@@ -90,6 +90,14 @@ class TTSProviderRequest(BaseModel):
     provider: str
 
 
+class DetectionToggleRequest(BaseModel):
+    enabled: bool
+
+
+class LLMProviderRequest(BaseModel):
+    provider: str  # google | groq | azure
+
+
 # ── REST Endpoints ──
 
 @app.get("/health")
@@ -101,8 +109,10 @@ async def health():
         "status": "ok",
         "mode": config.current_mode,
         "llm_provider": config.get_active_llm_provider(),
+        "llm_model": getattr(getattr(config.llm, config.get_active_llm_provider(), None), "model", "?"),
         "tts_provider": config.tts.provider,
         "stt_provider": config.stt.provider,
+        "detection_enabled": config.app.detection_enabled,
         "detector_stats": pipeline.detector.stats,
     }
 
@@ -126,6 +136,51 @@ async def debug_stats():
     if hasattr(pipeline.tts, "stats"):
         stats["tts"] = pipeline.tts.stats
     return stats
+
+
+@app.post("/config/llm")
+async def switch_llm_provider(req: LLMProviderRequest):
+    """Switch vision LLM provider at runtime (google | groq | vllm).
+
+    google → Gemini 2.0 Flash (fast, accurate, great for Indian text).
+    groq   → Llama 4 Scout vision (near-zero latency on Groq hardware).
+    vllm   → Local high-performance LLM deployment.
+    """
+    config = _get_config()
+    pipeline = _get_pipeline()
+    try:
+        config.toggle_llm(req.provider)
+        # Re-create LLM instance with new provider
+        from backend.src.providers.factory import create_provider
+        pipeline.llm = create_provider("llm", config)
+        model = getattr(getattr(config.llm, req.provider, None), "model", "?")
+        logger.info(f"[/config/llm] Switched LLM to: {req.provider} ({model})")
+        return {
+            "status": "ok",
+            "llm_provider": req.provider,
+            "llm_model": model,
+            "message": f"Vision LLM switched to {req.provider} ({model})",
+        }
+    except ValueError as e:
+        return JSONResponse(status_code=400, content={"error": str(e)})
+
+
+@app.post("/config/detection")
+async def toggle_detection(req: DetectionToggleRequest):
+    """Enable or disable YOLO detection at runtime.
+
+    When disabled: pic → Gemini Vision directly (no YOLO gate).
+    When enabled: pic → YOLO → (if object found) → Gemini Vision.
+    """
+    config = _get_config()
+    config.toggle_detection(req.enabled)
+    logger.info(f"[/config/detection] Detection {'ENABLED' if req.enabled else 'DISABLED'}")
+    return {
+        "status": "ok",
+        "detection_enabled": req.enabled,
+        "message": f"YOLO detection {'enabled' if req.enabled else 'disabled'} — "
+                   f"frames now go {'YOLO → LLM' if req.enabled else 'directly to LLM'}",
+    }
 
 
 @app.post("/config/mode")
@@ -229,6 +284,80 @@ async def process_voice(audio: UploadFile = File(...)):
     elapsed_ms = (time.perf_counter() - start) * 1000
     logger.info(f"[/voice] Completed in {elapsed_ms:.0f}ms: action={result.get('action')}")
     return result
+
+
+@app.post("/voice/listen")
+async def voice_listen(audio: UploadFile = File(...)):
+    """Lightweight always-on voice command listener.
+
+    Accepts short audio clips (~2s) from the continuous mic cycle.
+    Runs STT → Intent classification. Returns:
+      - has_command: whether a meaningful command was detected
+      - action, text, etc. if a command was found
+
+    Designed to be called rapidly (every ~2s) without blocking the client.
+    Empty/silent clips return immediately with has_command=false.
+    """
+    pipeline = _get_pipeline()
+    start = time.perf_counter()
+    contents = await audio.read()
+
+    # Quick size check — very short clips are likely silence
+    if len(contents) < 500:
+        return {"has_command": False, "reason": "too_short"}
+
+    # STT
+    try:
+        text = await pipeline.stt.transcribe(contents)
+    except Exception as e:
+        logger.warning(f"[/voice/listen] STT error: {e}")
+        return {"has_command": False, "reason": "stt_error"}
+
+    elapsed_stt = (time.perf_counter() - start) * 1000
+
+    if not text or not text.strip():
+        logger.debug(f"[/voice/listen] No speech detected ({elapsed_stt:.0f}ms)")
+        return {"has_command": False, "reason": "no_speech"}
+
+    # Intent classification
+    result = pipeline.intent_classifier.classify(text)
+    elapsed_ms = (time.perf_counter() - start) * 1000
+
+    # Filter out low-confidence / unknown intents
+    from backend.src.voice.intent import Intent
+    actionable_intents = {
+        Intent.SCAN, Intent.START_CONTINUOUS, Intent.STOP_CONTINUOUS,
+        Intent.SWITCH_MODE, Intent.REPEAT,
+    }
+
+    if result.intent in actionable_intents and result.confidence >= 0.5:
+        logger.info(
+            f"[/voice/listen] ✅ COMMAND: '{text}' → {result.intent.value} "
+            f"(conf={result.confidence:.2f}, {elapsed_ms:.0f}ms)"
+        )
+        # Dispatch to get the full result (same as /voice)
+        dispatch_result = await pipeline._dispatch_intent(result)
+        return {
+            "has_command": True,
+            "action": dispatch_result.get("action"),
+            "text": text,
+            "intent": result.intent.value,
+            "confidence": result.confidence,
+            **dispatch_result,
+        }
+
+    # No actionable command — could be ambient speech
+    logger.debug(
+        f"[/voice/listen] No command: '{text}' → {result.intent.value} "
+        f"(conf={result.confidence:.2f}, {elapsed_ms:.0f}ms)"
+    )
+    return {
+        "has_command": False,
+        "text": text,
+        "intent": result.intent.value,
+        "confidence": result.confidence,
+        "reason": "no_actionable_command",
+    }
 
 
 @app.post("/chat")

@@ -7,7 +7,7 @@ Swapping providers requires zero code changes — just update config.yml.
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from typing import AsyncIterator
+from typing import AsyncIterator, Union
 
 
 class BaseLLM(ABC):
@@ -49,3 +49,7 @@ class BaseSTT(ABC):
     async def transcribe(self, audio: bytes) -> str:
         """Transcribe audio bytes to text."""
         ...
+
+
+# Union type for the provider factory registry
+BaseProvider = Union[BaseLLM, BaseTTS, BaseSTT]

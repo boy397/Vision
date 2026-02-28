@@ -8,18 +8,24 @@ import {
     SafeAreaView,
     TextInput,
     ActivityIndicator,
+    Switch,
 } from 'react-native';
 import api, { type HealthStatus, type Mode } from '@/services/api';
 import { API_BASE } from '@/services/api';
 
 type TTSProvider = 'elevenlabs' | 'sarvam';
+type LLMProvider = 'google' | 'groq' | 'vllm';
 
 export default function SettingsScreen() {
     const [health, setHealth] = useState<HealthStatus | null>(null);
     const [loading, setLoading] = useState(false);
     const [mode, setMode] = useState<Mode>('medical');
     const [serverUrl, setServerUrl] = useState(API_BASE);
-    const [ttsProvider, setTtsProvider] = useState<TTSProvider>('elevenlabs');
+    const [ttsProvider, setTtsProvider] = useState<TTSProvider>('sarvam');
+    const [llmProvider, setLlmProvider] = useState<LLMProvider>('google');
+    const [llmUpdating, setLlmUpdating] = useState(false);
+    const [detectionEnabled, setDetectionEnabled] = useState(true);
+    const [detectionUpdating, setDetectionUpdating] = useState(false);
     const [error, setError] = useState<string | null>(null);
     const [ttsUpdating, setTtsUpdating] = useState(false);
 
@@ -35,6 +41,8 @@ export default function SettingsScreen() {
             setHealth(data);
             setMode(data.mode as Mode);
             setTtsProvider(data.tts_provider as TTSProvider);
+            setLlmProvider(data.llm_provider as LLMProvider);
+            setDetectionEnabled(data.detection_enabled ?? true);
         } catch (err) {
             setError('Cannot connect to backend');
             setHealth(null);
@@ -72,6 +80,33 @@ export default function SettingsScreen() {
         }
     };
 
+    const handleDetectionToggle = async (value: boolean) => {
+        setDetectionUpdating(true);
+        setDetectionEnabled(value);
+        try {
+            await api.toggleDetection(value);
+            console.log(`[Settings] YOLO detection ${value ? 'enabled' : 'disabled'}`);
+        } catch (err) {
+            setDetectionEnabled(!value);
+            setError('Failed to update detection setting');
+        } finally {
+            setDetectionUpdating(false);
+        }
+    };
+
+    const handleLLMSwitch = async (provider: LLMProvider) => {
+        setLlmUpdating(true);
+        try {
+            await api.switchLlmProvider(provider);
+            setLlmProvider(provider);
+            await checkHealth(); // Refresh to get updated model name
+        } catch (err) {
+            setError('Failed to switch vision model');
+        } finally {
+            setLlmUpdating(false);
+        }
+    };
+
     return (
         <SafeAreaView style={styles.container}>
             <ScrollView contentContainerStyle={styles.content}>
@@ -90,7 +125,7 @@ export default function SettingsScreen() {
                         <View style={styles.statusGrid}>
                             <StatusRow label="Status" value={health.status} />
                             <StatusRow label="Mode" value={health.mode} />
-                            <StatusRow label="LLM" value={health.llm_provider} />
+                            <StatusRow label="LLM" value={`${health.llm_provider} / ${health.llm_model ?? '?'}`} />
                             <StatusRow label="TTS" value={health.tts_provider} />
                             <StatusRow label="STT" value={health.stt_provider} />
                         </View>
@@ -141,6 +176,86 @@ export default function SettingsScreen() {
                     </View>
                 </View>
 
+                {/* Vision Model */}
+                <View style={styles.card}>
+                    <View style={styles.cardHeader}>
+                        <Text style={styles.cardTitle}>Vision Model</Text>
+                        {llmUpdating && <ActivityIndicator color="#6c5ce7" size="small" />}
+                    </View>
+                    <Text style={styles.cardSub}>Choose LLM for image analysis (Tier 2)</Text>
+                    <View style={styles.modeRow}>
+                        <TouchableOpacity
+                            style={[styles.modeBtn, llmProvider === 'google' && styles.llmBtnActiveGoogle]}
+                            onPress={() => handleLLMSwitch('google')}
+                            disabled={llmUpdating}
+                        >
+                            <Text style={styles.modeBtnIcon}>✨</Text>
+                            <View>
+                                <Text style={[styles.modeBtnText, llmProvider === 'google' && styles.modeBtnTextActive]}>Gemini</Text>
+                                <Text style={styles.ttsSubText}>Flash</Text>
+                            </View>
+                        </TouchableOpacity>
+                        <TouchableOpacity
+                            style={[styles.modeBtn, llmProvider === 'groq' && styles.llmBtnActiveGroq]}
+                            onPress={() => handleLLMSwitch('groq')}
+                            disabled={llmUpdating}
+                        >
+                            <Text style={styles.modeBtnIcon}>⚡</Text>
+                            <View>
+                                <Text style={[styles.modeBtnText, llmProvider === 'groq' && styles.modeBtnTextActive]}>Groq</Text>
+                                <Text style={styles.ttsSubText}>Llama 4</Text>
+                            </View>
+                        </TouchableOpacity>
+                        <TouchableOpacity
+                            style={[styles.modeBtn, llmProvider === 'vllm' && styles.llmBtnActiveVllm]}
+                            onPress={() => handleLLMSwitch('vllm')}
+                            disabled={llmUpdating}
+                        >
+                            <Text style={styles.modeBtnIcon}>🧠</Text>
+                            <View>
+                                <Text style={[styles.modeBtnText, llmProvider === 'vllm' && styles.modeBtnTextActive]}>vLLM</Text>
+                                <Text style={styles.ttsSubText}>Qwen 2.5</Text>
+                            </View>
+                        </TouchableOpacity>
+                    </View>
+                    {health?.llm_model && (
+                        <Text style={styles.activeModelText}>Active: {health.llm_model}</Text>
+                    )}
+                </View>
+
+                {/* Pipeline Config */}
+                <View style={styles.card}>
+                    <Text style={styles.cardTitle}>Pipeline</Text>
+                    <Text style={styles.cardSub}>Configure how frames are processed</Text>
+
+                    {/* YOLO Toggle */}
+                    <View style={styles.toggleRow}>
+                        <View style={styles.toggleInfo}>
+                            <Text style={styles.toggleLabel}>YOLO Detection</Text>
+                            <Text style={styles.toggleSub}>
+                                {detectionEnabled
+                                    ? '📷 → YOLO → Gemini Vision → TTS'
+                                    : '📷 → Gemini Vision directly → TTS'}
+                            </Text>
+                        </View>
+                        {detectionUpdating ? (
+                            <ActivityIndicator color="#6c5ce7" size="small" />
+                        ) : (
+                            <Switch
+                                value={detectionEnabled}
+                                onValueChange={handleDetectionToggle}
+                                trackColor={{ false: '#1a1a2e', true: '#6c5ce755' }}
+                                thumbColor={detectionEnabled ? '#6c5ce7' : '#55556a'}
+                            />
+                        )}
+                    </View>
+                    <Text style={styles.toggleHint}>
+                        {detectionEnabled
+                            ? 'YOLO on: Only frames with detected objects reach Gemini. Faster, but may miss things.'
+                            : 'YOLO off: Every frame goes to Gemini directly. More thorough, slightly slower.'}
+                    </Text>
+                </View>
+
                 {/* TTS Provider */}
                 <View style={styles.card}>
                     <View style={styles.cardHeader}>
@@ -185,7 +300,8 @@ export default function SettingsScreen() {
                         Vision AI — Assistive system for visually impaired users.{'\n'}
                         Dual-mode: Medical (medicines, prescriptions) + Retail (products, currency).{'\n'}
                         All interaction via voice commands.{'\n\n'}
-                        Voice: "scan" → one-shot | "scan continue" → continuous | "scan stop" → stop
+                        Voice: "scan" → one-shot | "scan continue" → continuous | "stop" → stop{'\n'}
+                        "what is this" / "read this" / "check this" → all trigger a scan
                     </Text>
                 </View>
             </ScrollView>
@@ -234,6 +350,16 @@ const styles = StyleSheet.create({
     modeBtnText: { color: '#8888a0', fontSize: 15, fontWeight: '600' },
     modeBtnTextActive: { color: '#f0f0f5' },
     ttsSubText: { color: '#55556a', fontSize: 10, marginTop: 1 },
+    llmBtnActiveGoogle: { borderColor: '#00b894', backgroundColor: '#00b89411' },
+    llmBtnActiveGroq: { borderColor: '#fdcb6e', backgroundColor: '#fdcb6e11' },
+    llmBtnActiveVllm: { borderColor: '#e84393', backgroundColor: '#e8439311' },
+    activeModelText: { color: '#55556a', fontSize: 11, marginTop: 8, textAlign: 'center' },
+    // Toggle / Pipeline
+    toggleRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginTop: 4, marginBottom: 8 },
+    toggleInfo: { flex: 1, marginRight: 12 },
+    toggleLabel: { color: '#f0f0f5', fontSize: 15, fontWeight: '600' },
+    toggleSub: { color: '#6c5ce7', fontSize: 11, marginTop: 2, fontFamily: 'monospace' },
+    toggleHint: { color: '#55556a', fontSize: 12, lineHeight: 16, marginTop: 4 },
     // About
     aboutText: { color: '#8888a0', fontSize: 13, lineHeight: 20, marginTop: 8 },
 });

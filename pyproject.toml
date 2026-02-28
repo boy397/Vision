@@ -9,6 +9,7 @@ dependencies = [
     "funasr>=1.2.4",
     "google-cloud-speech>=2.37.0",
     "google-genai>=1.65.0",
+    "groq>=1.0.0",
     "httpx>=0.28.1",
     "modelscope>=1.22.3",
     "numpy>=2.4.2",

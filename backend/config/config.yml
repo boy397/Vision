@@ -39,9 +39,9 @@ modes:
 
 # ── LLM Provider (Tier 2 Vision + Chat) ──
 llm:
-  provider: "groq"
+  provider: "vllm"  # Options: google | groq | azure | vllm
   groq:
-    model: "llama-3.2-90b-vision-preview"
+    model: "meta-llama/llama-4-scout-17b-16e-instruct"
     temperature: 0.3
     max_tokens: 512
   google:
@@ -54,6 +54,11 @@ llm:
     api_version: "2024-12-01-preview"
     temperature: 0.3
     max_tokens: 512
+  vllm:
+    model: "Qwen/Qwen2.5-VL-7B-Instruct"
+    api_base: "http://localhost:8001/v1"
+    temperature: 0.3
+    max_tokens: 512
 
 # ── STT (Speech-to-Text) ──
 stt:
@@ -64,12 +69,12 @@ stt:
     model: "latest_long"
     language: "en-IN"
   sarvam:
-    model: "saarika:v2"
-    language: "en-IN"
+    model: "saarika:v2.5"  # Options: saarika:v2.5 (default) | saaras:v3 (advanced)
+    language: "en-IN"  # Use "unknown" for auto-detect, "hi-IN" for Hindi
 
 # ── TTS (Text-to-Speech) ──
 tts:
-  provider: "elevenlabs"
+  provider: "sarvam"  # Switch to "elevenlabs" to use ElevenLabs instead
   elevenlabs:
     voice_id: "JBFqnCBsd6RMkjVDRZzb"
     model: "eleven_turbo_v2_5"
@@ -77,9 +82,9 @@ tts:
     similarity_boost: 0.75
     stream: true
   sarvam:
-    model: "bulbul:v2"
-    language: "hi-IN"
-    speaker: "meera"
+    model: "bulbul:v3"
+    language: "en-IN"
+    speaker: "shubh"  # Must be lowercase. v3 speakers: shubh, aditya, ritu, priya, neha, rahul, pooja, rohan, simran, kavya...
 
 # ── Voice Commands ──
 voice:

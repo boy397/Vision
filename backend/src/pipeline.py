@@ -115,13 +115,51 @@ class VisionPipeline:
         frame_num = self._total_frames
         mode = self.config.current_mode
         det_config = self.config.get_active_detection()
+        detection_enabled = self.config.app.detection_enabled
 
         logger.debug(
             f"[Pipeline] Frame #{frame_num}: shape={frame.shape}, "
-            f"mode={mode}, force={force}"
+            f"mode={mode}, force={force}, detection_enabled={detection_enabled}"
         )
 
-        # Tier 1: YOLO Detection + Tracking
+        # ── Path A: YOLO disabled — send full frame straight to LLM ──
+        if not detection_enabled:
+            logger.info(
+                f"[Pipeline] Frame #{frame_num}: YOLO DISABLED — direct to LLM "
+                f"(using {type(self.llm).__name__}, config says '{self.config.get_active_llm_provider()}')"
+            )
+            prompt = self.config.get_prompt("vision_system_prompt")
+            with latency_tracker("roi_encode", logger):
+                frame_bytes = encode_jpeg(resize_frame(frame))
+                logger.debug(f"[Pipeline] Full frame encoded: {len(frame_bytes)} bytes")
+
+            with latency_tracker("llm_analyze", logger):
+                analysis = await self.llm.analyze_image(frame_bytes, prompt)
+
+            # Log LLM output for debugging
+            logger.info(
+                f"[Pipeline] Frame #{frame_num}: LLM raw response: "
+                f"{str(analysis)[:300]}"
+            )
+
+            tts_text = self._format_tts(analysis)
+            self._last_analysis = analysis
+            self._last_tts_text = tts_text
+
+            elapsed_ms = (time.perf_counter() - frame_start) * 1000
+            logger.info(
+                f"[Pipeline] Frame #{frame_num}: no-YOLO COMPLETE in {elapsed_ms:.0f}ms, "
+                f"tts_text=\"{tts_text[:100]}\""  # Log actual TTS text
+            )
+            return PipelineResult(
+                detections=[],
+                analysis=analysis,
+                tts_text=tts_text,
+                mode=mode,
+                state_changed=True,
+            )
+
+        # ── Path B: YOLO enabled — detect first ──
         with latency_tracker("yolo_detect", logger):
             detections = self.detector.detect(
                 frame,
@@ -132,8 +170,9 @@ class VisionPipeline:
         if not detections:
             elapsed_ms = (time.perf_counter() - frame_start) * 1000
             self._total_frame_time_ms += elapsed_ms
-            logger.debug(
-                f"[Pipeline] Frame #{frame_num}: no detections ({elapsed_ms:.0f}ms)"
+            logger.info(
+                f"[Pipeline] Frame #{frame_num}: no detections ({elapsed_ms:.0f}ms) — "
+                "returning 'nothing relevant'"
             )
             return PipelineResult(mode=mode, tts_text="I don't see anything relevant right now.")
 
@@ -338,7 +377,12 @@ class VisionPipeline:
         """Route intent to appropriate action."""
         match result.intent:
             case Intent.SCAN:
-                return {"action": "scan", "text": result.raw_text, "message": "Scan triggered"}
+                return {
+                    "action": "scan",
+                    "text": result.raw_text,
+                    "message": "Scan triggered",
+                    "tts_ack": "Scanning now.",  # Frontend can speak this immediately
+                }
 
             case Intent.START_CONTINUOUS:
                 self._continuous_mode = True

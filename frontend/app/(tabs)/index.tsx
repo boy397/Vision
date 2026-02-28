@@ -13,6 +13,7 @@ import { CameraView, useCameraPermissions } from "expo-camera";
 import { Audio } from "expo-av";
 import api, { type ScanResult, type Detection } from "@/services/api";
 import scanEvents, { type ScanCommand } from "@/services/scanEvents";
+import voiceStream, { type VoiceStreamStatus } from "@/services/voiceStream";
 
 const { width: SCREEN_WIDTH } = Dimensions.get("window");
 const CAMERA_HEIGHT = 450;
@@ -27,6 +28,7 @@ export default function ScannerScreen() {
     "idle",
   );
   const [statusText, setStatusText] = useState('Say "scan" to capture');
+  const [voiceStatus, setVoiceStatus] = useState<VoiceStreamStatus>("idle");
   const cameraRef = useRef<CameraView>(null);
   const isScanningRef = useRef(false);
   const continuousTimerRef = useRef<ReturnType<typeof setInterval> | null>(
@@ -36,6 +38,27 @@ export default function ScannerScreen() {
 
   // Track which objects have already been analyzed (by class + rough bbox region)
   const analyzedObjectsRef = useRef<Set<string>>(new Set());
+
+  // ── Auto-start always-on voice listening when camera permission is granted ──
+  useEffect(() => {
+    if (!permission?.granted) return;
+
+    // Start the voice stream service
+    voiceStream.start();
+
+    // Subscribe to status updates
+    const unsub = voiceStream.onStatus((status, detail) => {
+      setVoiceStatus(status);
+      if (status === "error" && detail) {
+        console.warn("[Scanner] Voice stream error:", detail);
+      }
+    });
+
+    return () => {
+      unsub();
+      voiceStream.stop();
+    };
+  }, [permission?.granted]);
 
   // ── Single scan ──
   const performScan = useCallback(async (skipTracked: boolean = false) => {
@@ -94,7 +117,7 @@ export default function ScannerScreen() {
                 );
                 // Clean up previous sound
                 if (soundRef.current) {
-                  await soundRef.current.unloadAsync().catch(() => {});
+                  await soundRef.current.unloadAsync().catch(() => { });
                 }
                 soundRef.current = sound;
               }
@@ -167,7 +190,7 @@ export default function ScannerScreen() {
   useEffect(() => {
     return () => {
       if (soundRef.current) {
-        soundRef.current.unloadAsync().catch(() => {});
+        soundRef.current.unloadAsync().catch(() => { });
       }
     };
   }, []);
@@ -290,6 +313,42 @@ export default function ScannerScreen() {
               : scanState === "single"
                 ? "SCANNING"
                 : "IDLE"}
+          </Text>
+        </View>
+
+        {/* Voice Listening Indicator */}
+        <View
+          style={[
+            styles.voiceBadge,
+            {
+              backgroundColor:
+                voiceStatus === "listening"
+                  ? "#00b89422"
+                  : voiceStatus === "error"
+                    ? "#e1705522"
+                    : "#636e7222",
+            },
+          ]}
+        >
+          <View
+            style={[
+              styles.voiceDot,
+              {
+                backgroundColor:
+                  voiceStatus === "listening"
+                    ? "#00b894"
+                    : voiceStatus === "error"
+                      ? "#e17055"
+                      : "#636e72",
+              },
+            ]}
+          />
+          <Text style={styles.voiceBadgeText}>
+            {voiceStatus === "listening"
+              ? "🎤 VOICE ON"
+              : voiceStatus === "error"
+                ? "🎤 ERROR"
+                : "🎤 OFF"}
           </Text>
         </View>
 
@@ -454,6 +513,25 @@ const styles = StyleSheet.create({
     borderRadius: 20,
   },
   modeBadgeText: { color: "#f0f0f5", fontSize: 13, fontWeight: "600" },
+  // Voice Listening Indicator
+  voiceBadge: {
+    position: "absolute",
+    bottom: 85,
+    right: 12,
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 5,
+    paddingHorizontal: 10,
+    paddingVertical: 5,
+    borderRadius: 16,
+  },
+  voiceDot: { width: 7, height: 7, borderRadius: 4 },
+  voiceBadgeText: {
+    color: "#f0f0f5",
+    fontSize: 10,
+    fontWeight: "700",
+    letterSpacing: 0.5,
+  },
   // Scan State
   scanStateBadge: {
     position: "absolute",
