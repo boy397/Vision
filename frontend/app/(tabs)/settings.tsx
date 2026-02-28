@@ -21,6 +21,8 @@ export default function SettingsScreen() {
     const [mode, setMode] = useState<Mode>('medical');
     const [serverUrl, setServerUrl] = useState(API_BASE);
     const [ttsProvider, setTtsProvider] = useState<TTSProvider>('sarvam');
+    const [llmProvider, setLlmProvider] = useState<'google' | 'groq'>('google');
+    const [llmUpdating, setLlmUpdating] = useState(false);
     const [detectionEnabled, setDetectionEnabled] = useState(true);
     const [detectionUpdating, setDetectionUpdating] = useState(false);
     const [error, setError] = useState<string | null>(null);
@@ -38,6 +40,7 @@ export default function SettingsScreen() {
             setHealth(data);
             setMode(data.mode as Mode);
             setTtsProvider(data.tts_provider as TTSProvider);
+            setLlmProvider(data.llm_provider as 'google' | 'groq');
             setDetectionEnabled(data.detection_enabled ?? true);
         } catch (err) {
             setError('Cannot connect to backend');
@@ -78,15 +81,28 @@ export default function SettingsScreen() {
 
     const handleDetectionToggle = async (value: boolean) => {
         setDetectionUpdating(true);
-        setDetectionEnabled(value); // Optimistic update
+        setDetectionEnabled(value);
         try {
             await api.toggleDetection(value);
             console.log(`[Settings] YOLO detection ${value ? 'enabled' : 'disabled'}`);
         } catch (err) {
-            setDetectionEnabled(!value); // Revert on failure
+            setDetectionEnabled(!value);
             setError('Failed to update detection setting');
         } finally {
             setDetectionUpdating(false);
+        }
+    };
+
+    const handleLLMSwitch = async (provider: 'google' | 'groq') => {
+        setLlmUpdating(true);
+        try {
+            await api.switchLlmProvider(provider);
+            setLlmProvider(provider);
+            await checkHealth(); // Refresh to get updated model name
+        } catch (err) {
+            setError('Failed to switch vision model');
+        } finally {
+            setLlmUpdating(false);
         }
     };
 
@@ -108,7 +124,7 @@ export default function SettingsScreen() {
                         <View style={styles.statusGrid}>
                             <StatusRow label="Status" value={health.status} />
                             <StatusRow label="Mode" value={health.mode} />
-                            <StatusRow label="LLM" value={health.llm_provider} />
+                            <StatusRow label="LLM" value={`${health.llm_provider} / ${health.llm_model ?? '?'}`} />
                             <StatusRow label="TTS" value={health.tts_provider} />
                             <StatusRow label="STT" value={health.stt_provider} />
                         </View>
@@ -157,6 +173,46 @@ export default function SettingsScreen() {
                             <Text style={[styles.modeBtnText, mode === 'retail' && styles.modeBtnTextActive]}>Retail</Text>
                         </TouchableOpacity>
                     </View>
+                </View>
+
+                {/* Vision Model */}
+                <View style={styles.card}>
+                    <View style={styles.cardHeader}>
+                        <Text style={styles.cardTitle}>Vision Model</Text>
+                        {llmUpdating && <ActivityIndicator color="#6c5ce7" size="small" />}
+                    </View>
+                    <Text style={styles.cardSub}>Choose LLM for image analysis (Tier 2)</Text>
+                    <View style={styles.modeRow}>
+                        <TouchableOpacity
+                            style={[styles.modeBtn, llmProvider === 'google' && styles.llmBtnActiveGoogle]}
+                            onPress={() => handleLLMSwitch('google')}
+                            disabled={llmUpdating}
+                        >
+                            <Text style={styles.modeBtnIcon}>✨</Text>
+                            <View>
+                                <Text style={[styles.modeBtnText, llmProvider === 'google' && styles.modeBtnTextActive]}>
+                                    Gemini
+                                </Text>
+                                <Text style={styles.ttsSubText}>2.0 Flash</Text>
+                            </View>
+                        </TouchableOpacity>
+                        <TouchableOpacity
+                            style={[styles.modeBtn, llmProvider === 'groq' && styles.llmBtnActiveGroq]}
+                            onPress={() => handleLLMSwitch('groq')}
+                            disabled={llmUpdating}
+                        >
+                            <Text style={styles.modeBtnIcon}>⚡</Text>
+                            <View>
+                                <Text style={[styles.modeBtnText, llmProvider === 'groq' && styles.modeBtnTextActive]}>
+                                    Groq
+                                </Text>
+                                <Text style={styles.ttsSubText}>Llama 4 Scout</Text>
+                            </View>
+                        </TouchableOpacity>
+                    </View>
+                    {health?.llm_model && (
+                        <Text style={styles.activeModelText}>Active: {health.llm_model}</Text>
+                    )}
                 </View>
 
                 {/* Pipeline Config */}
@@ -286,6 +342,9 @@ const styles = StyleSheet.create({
     modeBtnText: { color: '#8888a0', fontSize: 15, fontWeight: '600' },
     modeBtnTextActive: { color: '#f0f0f5' },
     ttsSubText: { color: '#55556a', fontSize: 10, marginTop: 1 },
+    llmBtnActiveGoogle: { borderColor: '#00b894', backgroundColor: '#00b89411' },
+    llmBtnActiveGroq: { borderColor: '#fdcb6e', backgroundColor: '#fdcb6e11' },
+    activeModelText: { color: '#55556a', fontSize: 11, marginTop: 8, textAlign: 'center' },
     // Toggle / Pipeline
     toggleRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginTop: 4, marginBottom: 8 },
     toggleInfo: { flex: 1, marginRight: 12 },

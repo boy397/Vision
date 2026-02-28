@@ -39,9 +39,13 @@ modes:
 
 # ── LLM Provider (Tier 2 Vision + Chat) ──
 llm:
-  provider: "groq"
+  provider: "groq"  # Options: google | groq | azure
   groq:
-    model: "llama-3.2-90b-vision-preview"
+    # Best Groq vision models (2026):
+    #   llama-4-scout-17b-16e-instruct  ← fastest, very capable
+    #   llama-3.2-90b-vision-preview    ← good quality, slower on free tier
+    #   llama-3.2-11b-vision-preview    ← lightweight fallback
+    model: "meta-llama/llama-4-scout-17b-16e-instruct"
     temperature: 0.3
     max_tokens: 512
   google:
@@ -62,8 +66,8 @@ stt:
     model: "latest_long"
     language: "en-IN"
   sarvam:
-    model: "saarika:v2"
-    language: "en-IN"
+    model: "saarika:v2.5"  # Options: saarika:v2.5 (default) | saaras:v3 (advanced)
+    language: "en-IN"  # Use "unknown" for auto-detect, "hi-IN" for Hindi
 
 # ── TTS (Text-to-Speech) ──
 tts:

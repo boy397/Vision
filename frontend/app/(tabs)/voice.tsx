@@ -17,24 +17,26 @@ const RECONNECT_BASE_DELAY_MS = 1000;
 const RECONNECT_MAX_DELAY_MS = 15000;
 const PING_INTERVAL_MS = 15000; // Keepalive ping every 15s
 
-// PCM recording config: 16kHz, 16-bit, mono
+// Recording config for STT compatibility
+// Sarvam accepts: WAV, MP3, AAC/M4A, OGG, FLAC, WebM, AMR
+// Best quality for STT = 16kHz mono
 const RECORDING_OPTIONS: Audio.RecordingOptions = {
   isMeteringEnabled: false,
   android: {
-    extension: ".wav",
-    outputFormat: 4, // THREE_GPP
-    audioEncoder: 1, // AMR_NB
+    extension: ".m4a",
+    outputFormat: 2, // MPEG_4
+    audioEncoder: 3, // AAC
     sampleRate: 16000,
     numberOfChannels: 1,
-    bitRate: 256000,
+    bitRate: 64000,
   },
   ios: {
-    extension: ".wav",
-    outputFormat: "linearPCM" as any,
+    extension: ".m4a",
+    outputFormat: "applelossless" as any,
     audioQuality: 96, // MEDIUM
     sampleRate: 16000,
     numberOfChannels: 1,
-    bitRate: 256000,
+    bitRate: 64000,
     linearPCMBitDepth: 16,
     linearPCMIsBigEndian: false,
     linearPCMIsFloat: false,
@@ -260,8 +262,11 @@ export default function VoiceScreen() {
       const { granted } = await Audio.requestPermissionsAsync();
       if (!granted) {
         addToHistory("status", "⚠️ Microphone permission denied");
+        console.warn("[Voice] Microphone permission denied");
         return;
       }
+
+      console.log("[Voice] Starting recording (M4A/AAC, 16kHz mono)...");
 
       await Audio.setAudioModeAsync({
         allowsRecordingIOS: true,
@@ -269,39 +274,64 @@ export default function VoiceScreen() {
       });
 
       const { recording } = await Audio.Recording.createAsync(
-        Audio.RecordingOptionsPresets.HIGH_QUALITY,
+        RECORDING_OPTIONS,
       );
 
       recordingRef.current = recording;
       setListening(true);
+      console.log("[Voice] ✅ Recording started");
     } catch (err) {
-      console.error("Recording start error:", err);
+      console.error("[Voice] Recording start error:", err);
       addToHistory("status", "⚠️ Failed to start recording");
       setListening(false);
     }
   };
 
   const stopRecording = async () => {
-    if (!recordingRef.current) return;
+    if (!recordingRef.current) {
+      console.warn("[Voice] stopRecording called but no active recording");
+      return;
+    }
 
     setListening(false);
     setProcessing(true);
+    console.log("[Voice] Stopping recording...");
 
     try {
       // Need a tiny delay to ensure audio isn't completely empty if tapped too fast
       await new Promise((resolve) => setTimeout(resolve, 300));
 
+      // Get status before stopping for debug info
+      const status = await recordingRef.current.getStatusAsync();
+      console.log(
+        `[Voice] Recording status: duration=${status.durationMillis}ms, ` +
+        `isRecording=${status.isRecording}, metering=${status.metering}`
+      );
+
       await recordingRef.current.stopAndUnloadAsync();
       const uri = recordingRef.current.getURI();
       recordingRef.current = null;
 
+      console.log(`[Voice] Recording stopped. URI: ${uri}`);
+
       if (uri) {
+        if (status.durationMillis < 500) {
+          console.warn(`[Voice] ⚠️ Very short recording: ${status.durationMillis}ms — might be too short for STT`);
+          addToHistory("status", "⚠️ Recording too short — hold longer");
+          return;
+        }
+
         addToHistory("user", "🎤 Voice command sent...");
+        console.log(`[Voice] Sending ${status.durationMillis}ms audio to /voice...`);
         const result = await api.sendVoice(uri);
+        console.log(`[Voice] Result: action=${result.action}, text="${result.text || ""}"`);
         handleVoiceResult(result);
+      } else {
+        console.error("[Voice] ❌ No URI from recording — capture failed");
+        addToHistory("status", "⚠️ Recording failed — no audio captured");
       }
     } catch (err) {
-      console.error("Recording stop error:", err);
+      console.error("[Voice] Recording stop error:", err);
       addToHistory("system", "⚠️ Failed to process voice command");
       recordingRef.current = null;
     } finally {

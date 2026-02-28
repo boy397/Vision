@@ -122,7 +122,8 @@ class VisionPipeline:
         # ── Path A: YOLO disabled — send full frame straight to LLM ──
         if not detection_enabled:
             logger.info(
-                f"[Pipeline] Frame #{frame_num}: YOLO DISABLED — direct to LLM"
+                f"[Pipeline] Frame #{frame_num}: YOLO DISABLED — direct to LLM "
+                f"(using {type(self.llm).__name__}, config says '{self.config.get_active_llm_provider()}')"
             )
             prompt = self.config.get_prompt("vision_system_prompt")
             with latency_tracker("roi_encode", logger):
@@ -132,6 +133,12 @@ class VisionPipeline:
             with latency_tracker("llm_analyze", logger):
                 analysis = await self.llm.analyze_image(frame_bytes, prompt)
 
+            # Log LLM output for debugging
+            logger.info(
+                f"[Pipeline] Frame #{frame_num}: LLM raw response: "
+                f"{str(analysis)[:300]}"
+            )
+
             tts_text = self._format_tts(analysis)
             self._last_analysis = analysis
             self._last_tts_text = tts_text
@@ -139,7 +146,7 @@ class VisionPipeline:
             elapsed_ms = (time.perf_counter() - frame_start) * 1000
             logger.info(
                 f"[Pipeline] Frame #{frame_num}: no-YOLO COMPLETE in {elapsed_ms:.0f}ms, "
-                f"tts_len={len(tts_text)}"
+                f"tts_text=\"{tts_text[:100]}\""  # Log actual TTS text
             )
             return PipelineResult(
                 detections=[],

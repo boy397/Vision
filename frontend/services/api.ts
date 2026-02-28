@@ -38,6 +38,7 @@ export interface HealthStatus {
   status: string;
   mode: string;
   llm_provider: string;
+  llm_model?: string;
   tts_provider: string;
   stt_provider: string;
   detection_enabled: boolean;
@@ -158,12 +159,16 @@ class VisionAPI {
     const data = await res.json();
     const elapsed = Date.now() - start;
 
+    // Log everything the backend returned
     console.log(
       `[API] scanFromUri: ${elapsed}ms, ` +
       `${data.detections?.length || 0} detections, ` +
       `state_changed=${data.state_changed}, ` +
       `tts_len=${data.tts_text?.length || 0}`,
     );
+    console.log(`[API] scanFromUri LLM analysis:`, JSON.stringify(data.analysis || {}).substring(0, 500));
+    console.log(`[API] scanFromUri tts_text: "${data.tts_text || '(empty)'}"`);
+    if (data.mode) console.log(`[API] scanFromUri mode: ${data.mode}`);
 
     return data;
   }
@@ -189,13 +194,13 @@ class VisionAPI {
 
   async sendVoice(audioUri: string): Promise<VoiceResult> {
     const start = Date.now();
-    console.log(`[API] sendVoice: starting...`);
+    console.log(`[API] sendVoice: starting... audioUri=${audioUri}`);
 
     const formData = new FormData();
     formData.append("audio", {
       uri: audioUri,
-      type: "audio/wav",
-      name: "voice.wav",
+      type: "audio/mp4",  // Expo records as M4A/AAC on both Android and iOS
+      name: "voice.m4a",
     } as any);
 
     const res = await this.safeFetch(`${this.base}/voice`, {
@@ -208,6 +213,7 @@ class VisionAPI {
     console.log(
       `[API] sendVoice: ${elapsed}ms, action=${data.action}, text="${data.text || ""}"`,
     );
+    console.log(`[API] sendVoice full response:`, JSON.stringify(data).substring(0, 500));
 
     return data;
   }
@@ -217,6 +223,16 @@ class VisionAPI {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ question }),
+    });
+    return res.json();
+  }
+
+  /** Switch LLM vision provider at runtime (google | groq). */
+  async switchLlmProvider(provider: string): Promise<any> {
+    const res = await this.safeFetch(`${this.base}/config/llm`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ provider }),
     });
     return res.json();
   }

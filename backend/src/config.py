@@ -38,6 +38,7 @@ class LLMProviderConfig(BaseModel):
 class LLMConfig(BaseModel):
     provider: str = "google"
     google: LLMProviderConfig = Field(default_factory=LLMProviderConfig)
+    groq: LLMProviderConfig = Field(default_factory=LLMProviderConfig)
     azure: LLMProviderConfig = Field(default_factory=LLMProviderConfig)
 
 
@@ -117,6 +118,13 @@ class Config(BaseModel):
     def toggle_detection(self, enabled: bool) -> None:
         """Enable or disable YOLO detection at runtime."""
         self.app.detection_enabled = enabled
+
+    def toggle_llm(self, provider: str) -> None:
+        """Switch LLM provider at runtime (google | groq | azure)."""
+        allowed = ["google", "groq", "azure"]
+        if provider not in allowed:
+            raise ValueError(f"Unknown LLM provider: {provider}. Allowed: {allowed}")
+        self.llm.provider = provider
 
     @property
     def current_mode(self) -> str:
