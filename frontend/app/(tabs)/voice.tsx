@@ -9,11 +9,13 @@ import {
   ActivityIndicator,
 } from "react-native";
 import { Audio } from "expo-av";
-import api, { type VoiceResult } from "@/services/api";
-import { WS_URL } from "@/services/api";
+import api, { type VoiceResult, VOICE_WS_URL } from "@/services/api";
 import scanEvents from "@/services/scanEvents";
 
-const VOICE_WS_URL = WS_URL.replace("/stream", "/voice/stream");
+// Reconnect config
+const RECONNECT_BASE_DELAY_MS = 1000;
+const RECONNECT_MAX_DELAY_MS = 15000;
+const PING_INTERVAL_MS = 15000; // Keepalive ping every 15s
 
 // PCM recording config: 16kHz, 16-bit, mono
 const RECORDING_OPTIONS: Audio.RecordingOptions = {
@@ -55,6 +57,10 @@ export default function VoiceScreen() {
   const wsRef = useRef<WebSocket | null>(null);
   const soundRef = useRef<Audio.Sound | null>(null);
   const chunkIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const pingIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const reconnectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const reconnectAttemptRef = useRef(0);
+  const intentionalCloseRef = useRef(false);
 
   const addToHistory = useCallback(
     (type: "user" | "system" | "status", text: string) => {
@@ -72,22 +78,35 @@ export default function VoiceScreen() {
           const data = JSON.parse(event.data);
 
           if (data.type === "tts_done") {
-            return; // Audio stream complete marker
+            console.log("[WS] TTS audio stream complete");
+            return;
+          }
+
+          if (data.type === "pong") {
+            console.log("[WS] Pong received (keepalive OK)");
+            return;
           }
 
           if (data.type === "vad_reset") {
+            console.log("[WS] VAD reset confirmed");
             addToHistory("status", "🔄 VAD reset");
             return;
           }
 
+          if (data.type === "stats") {
+            console.log("[WS] Server stats:", JSON.stringify(data, null, 2));
+            return;
+          }
+
           // It's a voice command result
+          console.log("[WS] Voice result:", data.action, data.text || "");
           handleVoiceResult(data);
         }
         // Binary data = TTS audio chunks
         // In React Native, WebSocket binary comes as base64 or ArrayBuffer
         // We'll handle TTS via the scan/audio endpoint instead for reliability
       } catch (err) {
-        console.error("WS message parse error:", err);
+        console.error("[WS] Message parse error:", err);
       }
     },
     [addToHistory],
@@ -119,9 +138,9 @@ export default function VoiceScreen() {
           addToHistory(
             "system",
             data.tts_text ||
-              data.response ||
-              data.message ||
-              "Follow-up processed",
+            data.response ||
+            data.message ||
+            "Follow-up processed",
           );
           // Play TTS for follow-up responses
           if (data.tts_text) playTTSText(data.tts_text);
@@ -143,40 +162,90 @@ export default function VoiceScreen() {
     // Future: dedicated TTS endpoint
   };
 
-  // ── WebSocket connection management ──
+  // ── WebSocket connection management with auto-reconnect ──
+  const startPingInterval = useCallback(() => {
+    if (pingIntervalRef.current) clearInterval(pingIntervalRef.current);
+    pingIntervalRef.current = setInterval(() => {
+      if (wsRef.current?.readyState === WebSocket.OPEN) {
+        wsRef.current.send(JSON.stringify({ action: "ping" }));
+        console.log("[WS] Ping sent (keepalive)");
+      }
+    }, PING_INTERVAL_MS);
+  }, []);
+
+  const stopPingInterval = useCallback(() => {
+    if (pingIntervalRef.current) {
+      clearInterval(pingIntervalRef.current);
+      pingIntervalRef.current = null;
+    }
+  }, []);
+
   const connectWS = useCallback(() => {
     if (wsRef.current?.readyState === WebSocket.OPEN) return;
+    intentionalCloseRef.current = false;
 
+    console.log(`[WS] Connecting to ${VOICE_WS_URL}...`);
     const ws = new WebSocket(VOICE_WS_URL);
     ws.binaryType = "arraybuffer";
 
     ws.onopen = () => {
       setConnected(true);
+      reconnectAttemptRef.current = 0; // Reset reconnect counter
       addToHistory("status", "🟢 Connected to voice server");
+      console.log("[WS] ✅ Connected");
+      startPingInterval();
     };
 
     ws.onmessage = handleWSMessage;
 
     ws.onerror = (err) => {
-      console.error("WS error:", err);
+      console.error("[WS] ❌ Error:", err);
       setConnected(false);
     };
 
-    ws.onclose = () => {
+    ws.onclose = (event) => {
       setConnected(false);
-      addToHistory("status", "🔴 Disconnected from voice server");
+      stopPingInterval();
+      console.log(`[WS] 🔴 Closed (code=${event?.code}, intentional=${intentionalCloseRef.current})`);
+
+      if (!intentionalCloseRef.current) {
+        // Auto-reconnect with exponential backoff
+        const attempt = reconnectAttemptRef.current;
+        const delay = Math.min(
+          RECONNECT_BASE_DELAY_MS * Math.pow(2, attempt),
+          RECONNECT_MAX_DELAY_MS,
+        );
+        reconnectAttemptRef.current = attempt + 1;
+
+        addToHistory("status", `🔴 Disconnected — reconnecting in ${(delay / 1000).toFixed(1)}s (attempt ${attempt + 1})`);
+        console.log(`[WS] Scheduling reconnect in ${delay}ms (attempt ${attempt + 1})`);
+
+        reconnectTimerRef.current = setTimeout(() => {
+          console.log(`[WS] Reconnect attempt ${attempt + 1}...`);
+          connectWS();
+        }, delay);
+      } else {
+        addToHistory("status", "🔴 Disconnected from voice server");
+      }
     };
 
     wsRef.current = ws;
-  }, [handleWSMessage, addToHistory]);
+  }, [handleWSMessage, addToHistory, startPingInterval, stopPingInterval]);
 
   const disconnectWS = useCallback(() => {
+    intentionalCloseRef.current = true;
+    if (reconnectTimerRef.current) {
+      clearTimeout(reconnectTimerRef.current);
+      reconnectTimerRef.current = null;
+    }
+    stopPingInterval();
     if (wsRef.current) {
       wsRef.current.close();
       wsRef.current = null;
     }
     setConnected(false);
-  }, []);
+    console.log("[WS] Intentionally disconnected");
+  }, [stopPingInterval]);
 
   // ── Recording: push-to-talk fallback (sends complete audio to /voice) ──
   const startRecording = async () => {
@@ -184,7 +253,7 @@ export default function VoiceScreen() {
     try {
       // Unload previous just in case
       if (recordingRef.current) {
-        await recordingRef.current.stopAndUnloadAsync().catch(() => {});
+        await recordingRef.current.stopAndUnloadAsync().catch(() => { });
         recordingRef.current = null;
       }
 
@@ -243,9 +312,11 @@ export default function VoiceScreen() {
   // ── Cleanup ──
   useEffect(() => {
     return () => {
+      intentionalCloseRef.current = true;
       disconnectWS();
       if (chunkIntervalRef.current) clearInterval(chunkIntervalRef.current);
-      if (soundRef.current) soundRef.current.unloadAsync().catch(() => {});
+      if (reconnectTimerRef.current) clearTimeout(reconnectTimerRef.current);
+      if (soundRef.current) soundRef.current.unloadAsync().catch(() => { });
     };
   }, [disconnectWS]);
 

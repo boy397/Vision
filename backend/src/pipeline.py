@@ -1,9 +1,13 @@
-"""Main orchestration pipeline — ties together detection, LLM, TTS, STT, and voice."""
+"""Main orchestration pipeline — ties together detection, LLM, TTS, STT, and voice.
+
+Includes object tracking integration and comprehensive latency debugging.
+"""
 
 from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from typing import Any, AsyncIterator
 
 import numpy as np
@@ -51,14 +55,14 @@ class VisionPipeline:
     """Main pipeline orchestrator.
 
     Manages the full flow:
-      Frame → YOLO Detect → State Check → ROI Crop → LLM Analyze → TTS Speak
+      Frame → YOLO Detect+Track → State Check → ROI Crop → LLM Analyze → TTS Speak
       Audio → STT Transcribe → Intent Classify → Action Dispatch
     """
 
     def __init__(self, config: Config) -> None:
         self.config = config
 
-        # Detection
+        # Detection + Tracking
         det_config = config.get_active_detection()
         self.detector = Detector(det_config.model_dump())
         self.state_tracker = StateTracker(
@@ -80,6 +84,21 @@ class VisionPipeline:
         self._last_tts_text: str = ""
         self._continuous_mode: bool = config.app.trigger == "continuous"
 
+        # Pipeline stats
+        self._total_frames = 0
+        self._total_frame_time_ms = 0.0
+        self._total_voice_cmds = 0
+        self._total_voice_time_ms = 0.0
+        self._skipped_by_tracking = 0
+        self._skipped_by_state = 0
+
+        logger.info(
+            f"[Pipeline] Initialized: mode={config.current_mode}, "
+            f"continuous={self._continuous_mode}, "
+            f"llm={config.get_active_llm_provider()}, "
+            f"tts={config.tts.provider}, stt={config.stt.provider}"
+        )
+
     # ── Frame Processing (Tier 1 + Tier 2) ──
 
     async def process_frame(self, frame: np.ndarray, force: bool = False) -> PipelineResult:
@@ -89,10 +108,18 @@ class VisionPipeline:
             frame: BGR image as numpy array.
             force: If True, skip state change check (for triggered scans).
         """
+        frame_start = time.perf_counter()
+        self._total_frames += 1
+        frame_num = self._total_frames
         mode = self.config.current_mode
         det_config = self.config.get_active_detection()
 
-        # Tier 1: YOLO Detection
+        logger.debug(
+            f"[Pipeline] Frame #{frame_num}: shape={frame.shape}, "
+            f"mode={mode}, force={force}"
+        )
+
+        # Tier 1: YOLO Detection + Tracking
         with latency_tracker("yolo_detect", logger):
             detections = self.detector.detect(
                 frame,
@@ -101,15 +128,48 @@ class VisionPipeline:
             )
 
         if not detections:
+            elapsed_ms = (time.perf_counter() - frame_start) * 1000
+            self._total_frame_time_ms += elapsed_ms
+            logger.debug(
+                f"[Pipeline] Frame #{frame_num}: no detections ({elapsed_ms:.0f}ms)"
+            )
             return PipelineResult(mode=mode, tts_text="I don't see anything relevant right now.")
 
         det_dicts = [d.to_dict() for d in detections]
+
+        # Check if all detections are already-tracked objects (skip re-analysis)
+        if not force:
+            all_tracked = all(
+                not self.detector.is_new_object(d) for d in detections
+            )
+            if all_tracked:
+                self._skipped_by_tracking += 1
+                elapsed_ms = (time.perf_counter() - frame_start) * 1000
+                self._total_frame_time_ms += elapsed_ms
+                logger.debug(
+                    f"[Pipeline] Frame #{frame_num}: all objects already tracked, "
+                    f"skipping LLM ({elapsed_ms:.0f}ms) "
+                    f"[skip_count={self._skipped_by_tracking}]"
+                )
+                return PipelineResult(
+                    detections=det_dicts,
+                    mode=mode,
+                    state_changed=False,
+                )
 
         # State change check (skip if forced/triggered)
         if not force:
             with latency_tracker("state_check", logger):
                 state_changed = self.state_tracker.check(det_dicts)
             if not state_changed:
+                self._skipped_by_state += 1
+                elapsed_ms = (time.perf_counter() - frame_start) * 1000
+                self._total_frame_time_ms += elapsed_ms
+                logger.debug(
+                    f"[Pipeline] Frame #{frame_num}: state unchanged, "
+                    f"skipping LLM ({elapsed_ms:.0f}ms) "
+                    f"[skip_count={self._skipped_by_state}]"
+                )
                 return PipelineResult(
                     detections=det_dicts,
                     mode=mode,
@@ -119,19 +179,42 @@ class VisionPipeline:
         # Tier 2: LLM Vision Analysis
         # Crop ROI from best detection (highest confidence)
         best_det = max(detections, key=lambda d: d.confidence)
+        logger.info(
+            f"[Pipeline] Frame #{frame_num}: Tier 2 triggered — "
+            f"best={best_det.class_name}(conf={best_det.confidence:.2f}, "
+            f"track_id={best_det.track_id}), "
+            f"total_dets={len(detections)}"
+        )
+
         with latency_tracker("roi_crop", logger):
             roi = crop_roi(frame, best_det.bbox)
             roi_bytes = encode_jpeg(resize_frame(roi))
+            logger.debug(
+                f"[Pipeline] ROI: original={roi.shape}, encoded={len(roi_bytes)} bytes"
+            )
 
         prompt = self.config.get_prompt("vision_system_prompt")
 
         with latency_tracker("llm_analyze", logger):
             analysis = await self.llm.analyze_image(roi_bytes, prompt)
 
+        # Mark all detections as tracked/analyzed
+        for d in detections:
+            self.detector.mark_analyzed(d)
+
         # Generate TTS text from template
         tts_text = self._format_tts(analysis)
         self._last_analysis = analysis
         self._last_tts_text = tts_text
+
+        elapsed_ms = (time.perf_counter() - frame_start) * 1000
+        self._total_frame_time_ms += elapsed_ms
+
+        logger.info(
+            f"[Pipeline] Frame #{frame_num}: COMPLETE in {elapsed_ms:.0f}ms — "
+            f"dets={len(detections)}, tts_len={len(tts_text)}, "
+            f"analysis_keys={list(analysis.keys()) if analysis else 'none'}"
+        )
 
         return PipelineResult(
             detections=det_dicts,
@@ -148,21 +231,49 @@ class VisionPipeline:
 
         Returns action result dict.
         """
+        voice_start = time.perf_counter()
+        self._total_voice_cmds += 1
+        cmd_num = self._total_voice_cmds
+
+        logger.info(
+            f"[Pipeline] Voice #{cmd_num}: {len(audio)} bytes "
+            f"({len(audio) / (16000 * 2) * 1000:.0f}ms audio)"
+        )
+
         # STT
         with latency_tracker("stt_transcribe", logger):
             text = await self.stt.transcribe(audio)
 
         if not text:
+            elapsed_ms = (time.perf_counter() - voice_start) * 1000
+            logger.warning(
+                f"[Pipeline] Voice #{cmd_num}: STT returned empty ({elapsed_ms:.0f}ms)"
+            )
             return {"action": "none", "text": "", "message": "Could not understand audio"}
+
+        logger.info(f"[Pipeline] Voice #{cmd_num}: STT result: \"{text}\"")
 
         # Intent Classification
         with latency_tracker("intent_classify", logger):
             result = self.intent_classifier.classify(text)
 
-        logger.info(f"Voice: '{text}' → intent={result.intent.value} (conf={result.confidence:.2f})")
+        logger.info(
+            f"[Pipeline] Voice #{cmd_num}: "
+            f"'{text}' → intent={result.intent.value} "
+            f"(conf={result.confidence:.2f}, params={result.params})"
+        )
 
         # Dispatch
-        return await self._dispatch_intent(result)
+        dispatch_result = await self._dispatch_intent(result)
+
+        elapsed_ms = (time.perf_counter() - voice_start) * 1000
+        self._total_voice_time_ms += elapsed_ms
+        logger.info(
+            f"[Pipeline] Voice #{cmd_num}: COMPLETE in {elapsed_ms:.0f}ms — "
+            f"action={dispatch_result.get('action')}"
+        )
+
+        return dispatch_result
 
     async def _dispatch_intent(self, result: IntentResult) -> dict[str, Any]:
         """Route intent to appropriate action."""
@@ -172,6 +283,8 @@ class VisionPipeline:
 
             case Intent.START_CONTINUOUS:
                 self._continuous_mode = True
+                # Clear tracked objects for fresh continuous scan
+                self.detector.clear_tracked()
                 return {"action": "start_continuous", "message": "Continuous mode started"}
 
             case Intent.STOP_CONTINUOUS:
@@ -233,6 +346,7 @@ class VisionPipeline:
 
     async def speak(self, text: str) -> AsyncIterator[bytes]:
         """Convert text to speech audio chunks."""
+        logger.debug(f"[Pipeline] TTS speak: {len(text)} chars")
         with latency_tracker("tts_synthesize", logger):
             async for chunk in self.tts.synthesize(text):
                 yield chunk
@@ -308,3 +422,25 @@ class VisionPipeline:
     @property
     def is_continuous(self) -> bool:
         return self._continuous_mode
+
+    @property
+    def stats(self) -> dict:
+        """Return pipeline statistics for debugging."""
+        return {
+            "total_frames": self._total_frames,
+            "avg_frame_ms": round(
+                self._total_frame_time_ms / self._total_frames, 1
+            )
+            if self._total_frames
+            else 0,
+            "total_voice_cmds": self._total_voice_cmds,
+            "avg_voice_ms": round(
+                self._total_voice_time_ms / self._total_voice_cmds, 1
+            )
+            if self._total_voice_cmds
+            else 0,
+            "skipped_by_tracking": self._skipped_by_tracking,
+            "skipped_by_state": self._skipped_by_state,
+            "current_mode": self.config.current_mode,
+            "continuous_mode": self._continuous_mode,
+        }

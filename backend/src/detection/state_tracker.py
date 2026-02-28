@@ -2,6 +2,8 @@
 
 Compares detections frame-to-frame using IoU. If detected objects
 and positions haven't changed, returns state_changed=False.
+
+Now includes debug logging for every decision point.
 """
 
 from __future__ import annotations
@@ -37,6 +39,11 @@ class StateTracker:
         self._iou_threshold = iou_threshold
         self._previous_detections: list[dict] = []
         self._previous_classes: set[str] = set()
+        self._check_count = 0
+        self._change_count = 0
+        self._no_change_count = 0
+
+        logger.info(f"[StateTracker] Initialized: iou_threshold={iou_threshold}")
 
     def check(self, detections: list[dict]) -> bool:
         """Check if detections represent a state change from previous frame.
@@ -47,6 +54,7 @@ class StateTracker:
         Returns:
             True if state changed (should trigger Tier 2), False if same.
         """
+        self._check_count += 1
         current_classes = {d["class_name"] for d in detections}
 
         # No detections → state changed only if we previously had detections
@@ -54,15 +62,35 @@ class StateTracker:
             changed = bool(self._previous_detections)
             self._previous_detections = []
             self._previous_classes = set()
+            if changed:
+                self._change_count += 1
+            else:
+                self._no_change_count += 1
+            logger.debug(
+                f"[StateTracker] Check #{self._check_count}: "
+                f"no detections, was={'non-empty' if changed else 'empty'} → "
+                f"changed={changed}"
+            )
             return changed
 
-        # Different number of objects or different classes → state changed
+        # Different classes → state changed
         if current_classes != self._previous_classes:
+            logger.debug(
+                f"[StateTracker] Check #{self._check_count}: "
+                f"classes changed: {self._previous_classes} → {current_classes} → changed=True"
+            )
             self._update(detections, current_classes)
+            self._change_count += 1
             return True
 
+        # Different count → state changed
         if len(detections) != len(self._previous_detections):
+            logger.debug(
+                f"[StateTracker] Check #{self._check_count}: "
+                f"count changed: {len(self._previous_detections)} → {len(detections)} → changed=True"
+            )
             self._update(detections, current_classes)
+            self._change_count += 1
             return True
 
         # Check if positions changed significantly (IoU-based)
@@ -77,9 +105,21 @@ class StateTracker:
 
         # If all objects matched → no state change
         if matched == len(detections):
+            self._no_change_count += 1
+            logger.debug(
+                f"[StateTracker] Check #{self._check_count}: "
+                f"all {matched}/{len(detections)} matched (IoU>{self._iou_threshold}) → "
+                f"changed=False [total: {self._change_count} changes, "
+                f"{self._no_change_count} no-changes]"
+            )
             return False
 
+        logger.debug(
+            f"[StateTracker] Check #{self._check_count}: "
+            f"position change: {matched}/{len(detections)} matched → changed=True"
+        )
         self._update(detections, current_classes)
+        self._change_count += 1
         return True
 
     def _update(self, detections: list[dict], classes: set[str]) -> None:
@@ -89,5 +129,20 @@ class StateTracker:
 
     def reset(self) -> None:
         """Reset state tracker (e.g. on mode switch)."""
+        logger.info(
+            f"[StateTracker] Reset (had {len(self._previous_detections)} detections, "
+            f"{self._check_count} checks, {self._change_count} changes)"
+        )
         self._previous_detections = []
         self._previous_classes = set()
+
+    @property
+    def stats(self) -> dict:
+        """Return state tracker statistics."""
+        return {
+            "total_checks": self._check_count,
+            "state_changes": self._change_count,
+            "no_changes": self._no_change_count,
+            "iou_threshold": self._iou_threshold,
+            "current_objects": len(self._previous_detections),
+        }
