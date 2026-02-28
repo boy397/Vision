@@ -10,8 +10,9 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from backend.src.providers.base import BaseLLM, BaseSTT, BaseTTS
-from backend.src.providers.llm.google_llm import GoogleLLM
 from backend.src.providers.llm.azure_llm import AzureLLM
+from backend.src.providers.llm.google_llm import GoogleLLM
+from backend.src.providers.llm.groq_llm import GroqLLM
 from backend.src.providers.tts.elevenlabs_tts import ElevenLabsTTS
 from backend.src.providers.tts.sarvam_tts import SarvamTTS
 from backend.src.providers.stt.google_stt import GoogleSTT
@@ -22,7 +23,7 @@ if TYPE_CHECKING:
 
 # ── Registry ──
 _REGISTRY: dict[str, dict[str, type]] = {
-    "llm": {"google": GoogleLLM, "azure": AzureLLM},
+    "llm": {"google": GoogleLLM, "azure": AzureLLM, "groq": GroqLLM},
     "tts": {"elevenlabs": ElevenLabsTTS, "sarvam": SarvamTTS},
     "stt": {"google": GoogleSTT, "sarvam": SarvamSTT},
 }

@@ -6,8 +6,8 @@ Includes proper frame splitting, debug logging, and continuous operation trackin
 from __future__ import annotations
 
 import logging
-import time
 import collections
+import time
 
 logger = logging.getLogger(__name__)
 

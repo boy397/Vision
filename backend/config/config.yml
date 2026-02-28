@@ -24,8 +24,8 @@ modes:
       confidence: 0.40
       classes: ["pill_bottle", "blister_pack", "medicine_box", "prescription"]
     llm:
-      provider: "google"
-      model: "gemini-2.0-flash"
+      provider: "groq"
+      model: "llama-3.2-90b-vision-preview"
     prompt_file: "prompts/medical.yml"
   retail:
     detection:
@@ -33,13 +33,17 @@ modes:
       confidence: 0.45
       classes: ["currency_note", "product_box", "price_tag", "barcode"]
     llm:
-      provider: "google"
-      model: "gemini-2.0-flash"
+      provider: "groq"
+      model: "llama-3.2-90b-vision-preview"
     prompt_file: "prompts/retail.yml"
 
 # ── LLM Provider (Tier 2 Vision + Chat) ──
 llm:
-  provider: "google"
+  provider: "groq"
+  groq:
+    model: "llama-3.2-90b-vision-preview"
+    temperature: 0.3
+    max_tokens: 512
   google:
     model: "gemini-2.0-flash"
     temperature: 0.3

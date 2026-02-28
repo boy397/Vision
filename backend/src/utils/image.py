@@ -3,12 +3,10 @@
 from __future__ import annotations
 
 import base64
-import io
 import logging
 
 import cv2
 import numpy as np
-from PIL import Image
 
 logger = logging.getLogger(__name__)
 

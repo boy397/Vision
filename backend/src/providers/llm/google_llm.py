@@ -6,7 +6,6 @@ import base64
 import json
 import logging
 import os
-from typing import Any
 
 from backend.src.providers.base import BaseLLM
 

@@ -5,7 +5,6 @@ Includes object tracking integration and comprehensive latency debugging.
 
 from __future__ import annotations
 
-import asyncio
 import logging
 import time
 from typing import Any, AsyncIterator
@@ -13,7 +12,7 @@ from typing import Any, AsyncIterator
 import numpy as np
 
 from backend.src.config import Config, load_voice_commands
-from backend.src.detection.detector import Detector, Detection
+from backend.src.detection.detector import Detector
 from backend.src.detection.state_tracker import StateTracker
 from backend.src.providers.base import BaseLLM, BaseTTS, BaseSTT
 from backend.src.providers.factory import create_all_providers
