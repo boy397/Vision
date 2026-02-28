@@ -4,6 +4,7 @@
 commands:
   scan:
     phrases:
+      - "scan"
       - "scan this"
       - "what is this"
       - "what do I have"
@@ -15,6 +16,8 @@ commands:
 
   start_continuous:
     phrases:
+      - "scan continue"
+      - "scan continuous"
       - "start watching"
       - "keep looking"
       - "continuous mode"
@@ -24,6 +27,7 @@ commands:
 
   stop:
     phrases:
+      - "scan stop"
       - "stop watching"
       - "stop"
       - "pause"

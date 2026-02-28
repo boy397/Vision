@@ -53,13 +53,13 @@ llm:
 
 # ── STT (Speech-to-Text) ──
 stt:
-  provider: "google"
+  provider: "sarvam"
   google:
     model: "latest_long"
     language: "en-IN"
   sarvam:
     model: "saarika:v2"
-    language: "hi-IN"
+    language: "en-IN"
 
 # ── TTS (Text-to-Speech) ──
 tts:

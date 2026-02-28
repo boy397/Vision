@@ -12,12 +12,16 @@ import {
 import api, { type HealthStatus, type Mode } from '@/services/api';
 import { API_BASE } from '@/services/api';
 
+type TTSProvider = 'elevenlabs' | 'sarvam';
+
 export default function SettingsScreen() {
     const [health, setHealth] = useState<HealthStatus | null>(null);
     const [loading, setLoading] = useState(false);
     const [mode, setMode] = useState<Mode>('medical');
     const [serverUrl, setServerUrl] = useState(API_BASE);
+    const [ttsProvider, setTtsProvider] = useState<TTSProvider>('elevenlabs');
     const [error, setError] = useState<string | null>(null);
+    const [ttsUpdating, setTtsUpdating] = useState(false);
 
     useEffect(() => {
         checkHealth();
@@ -30,6 +34,7 @@ export default function SettingsScreen() {
             const data = await api.health();
             setHealth(data);
             setMode(data.mode as Mode);
+            setTtsProvider(data.tts_provider as TTSProvider);
         } catch (err) {
             setError('Cannot connect to backend');
             setHealth(null);
@@ -53,6 +58,18 @@ export default function SettingsScreen() {
     const handleServerUpdate = () => {
         api.setBaseUrl(serverUrl);
         checkHealth();
+    };
+
+    const handleTTSSwitch = async (provider: TTSProvider) => {
+        setTtsUpdating(true);
+        try {
+            await api.updateTtsProvider(provider);
+            setTtsProvider(provider);
+        } catch (err) {
+            setError('Failed to switch TTS provider');
+        } finally {
+            setTtsUpdating(false);
+        }
     };
 
     return (
@@ -92,7 +109,7 @@ export default function SettingsScreen() {
                         style={styles.input}
                         value={serverUrl}
                         onChangeText={setServerUrl}
-                        placeholder="http://10.0.2.2:8000"
+                        placeholder="https://..."
                         placeholderTextColor="#55556a"
                         autoCapitalize="none"
                         autoCorrect={false}
@@ -124,13 +141,51 @@ export default function SettingsScreen() {
                     </View>
                 </View>
 
+                {/* TTS Provider */}
+                <View style={styles.card}>
+                    <View style={styles.cardHeader}>
+                        <Text style={styles.cardTitle}>TTS Provider</Text>
+                        {ttsUpdating && <ActivityIndicator color="#6c5ce7" size="small" />}
+                    </View>
+                    <Text style={styles.cardSub}>Choose text-to-speech engine for voice responses</Text>
+                    <View style={styles.modeRow}>
+                        <TouchableOpacity
+                            style={[styles.modeBtn, ttsProvider === 'elevenlabs' && styles.ttsBtnActive]}
+                            onPress={() => handleTTSSwitch('elevenlabs')}
+                            disabled={ttsUpdating}
+                        >
+                            <Text style={styles.modeBtnIcon}>🎙️</Text>
+                            <View>
+                                <Text style={[styles.modeBtnText, ttsProvider === 'elevenlabs' && styles.modeBtnTextActive]}>
+                                    ElevenLabs
+                                </Text>
+                                <Text style={styles.ttsSubText}>Natural voice</Text>
+                            </View>
+                        </TouchableOpacity>
+                        <TouchableOpacity
+                            style={[styles.modeBtn, ttsProvider === 'sarvam' && styles.ttsBtnActive]}
+                            onPress={() => handleTTSSwitch('sarvam')}
+                            disabled={ttsUpdating}
+                        >
+                            <Text style={styles.modeBtnIcon}>🇮🇳</Text>
+                            <View>
+                                <Text style={[styles.modeBtnText, ttsProvider === 'sarvam' && styles.modeBtnTextActive]}>
+                                    Sarvam
+                                </Text>
+                                <Text style={styles.ttsSubText}>Indian voices</Text>
+                            </View>
+                        </TouchableOpacity>
+                    </View>
+                </View>
+
                 {/* Info */}
                 <View style={styles.card}>
                     <Text style={styles.cardTitle}>About</Text>
                     <Text style={styles.aboutText}>
                         Vision AI — Assistive system for visually impaired users.{'\n'}
                         Dual-mode: Medical (medicines, prescriptions) + Retail (products, currency).{'\n'}
-                        All interaction via voice commands.
+                        All interaction via voice commands.{'\n\n'}
+                        Voice: "scan" → one-shot | "scan continue" → continuous | "scan stop" → stop
                     </Text>
                 </View>
             </ScrollView>
@@ -174,9 +229,11 @@ const styles = StyleSheet.create({
     modeBtn: { flex: 1, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 8, paddingVertical: 14, backgroundColor: '#1a1a2e', borderRadius: 12, borderWidth: 2, borderColor: 'rgba(255,255,255,0.06)' },
     modeBtnActiveMed: { borderColor: '#6c5ce7', backgroundColor: '#6c5ce711' },
     modeBtnActiveRet: { borderColor: '#00cec9', backgroundColor: '#00cec911' },
+    ttsBtnActive: { borderColor: '#e17055', backgroundColor: '#e1705511' },
     modeBtnIcon: { fontSize: 20 },
     modeBtnText: { color: '#8888a0', fontSize: 15, fontWeight: '600' },
     modeBtnTextActive: { color: '#f0f0f5' },
+    ttsSubText: { color: '#55556a', fontSize: 10, marginTop: 1 },
     // About
     aboutText: { color: '#8888a0', fontSize: 13, lineHeight: 20, marginTop: 8 },
 });

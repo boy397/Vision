@@ -29,6 +29,10 @@ _config: Config | None = None
 async def lifespan(app: FastAPI) -> AsyncGenerator:
     """Startup / shutdown lifecycle."""
     global _pipeline, _config
+    # Load .env file into environment
+    from dotenv import load_dotenv
+    load_dotenv()
+
     setup_logging()
     logger.info("Starting Vision Assistive System...")
     _config = load_config()
@@ -75,6 +79,10 @@ class ModeSwitchRequest(BaseModel):
 
 class ChatRequest(BaseModel):
     question: str
+
+
+class TTSProviderRequest(BaseModel):
+    provider: str
 
 
 # ── REST Endpoints ──
@@ -179,7 +187,107 @@ async def chat(req: ChatRequest):
     return result
 
 
-# ── WebSocket (Continuous Mode) ──
+@app.post("/config/tts")
+async def update_tts_provider(req: TTSProviderRequest):
+    """Switch TTS provider at runtime (elevenlabs | sarvam)."""
+    config = _get_config()
+    pipeline = _get_pipeline()
+    allowed = ["elevenlabs", "sarvam"]
+    if req.provider not in allowed:
+        return JSONResponse(status_code=400, content={"error": f"Unknown TTS provider: {req.provider}. Allowed: {allowed}"})
+    config.tts.provider = req.provider
+    # Re-create TTS provider
+    from backend.src.providers.factory import create_provider
+    pipeline.tts = create_provider("tts", config)
+    return {"status": "ok", "tts_provider": req.provider}
+
+
+class TTSRequest(BaseModel):
+    text: str
+
+
+@app.post("/tts")
+async def text_to_speech(req: TTSRequest):
+    """Convert text to speech audio. Lightweight — no scan, just TTS."""
+    pipeline = _get_pipeline()
+
+    if not req.text:
+        return JSONResponse(status_code=400, content={"error": "No text provided"})
+
+    async def audio_stream():
+        async for chunk in pipeline.speak(req.text):
+            yield chunk
+
+    return StreamingResponse(audio_stream(), media_type="audio/mpeg")
+
+
+# ── WebSocket (Voice Streaming with VAD) ──
+
+@app.websocket("/voice/stream")
+async def voice_stream_ws(websocket: WebSocket):
+    """WebSocket for always-on voice with server-side VAD.
+
+    Client sends:
+      - binary: raw PCM audio chunks (16-bit, 16kHz, mono)
+
+    Server sends:
+      - text/JSON: intent classification results
+      - binary: TTS audio response
+    """
+    await websocket.accept()
+    pipeline = _get_pipeline()
+    config = _get_config()
+    logger.info("Voice stream client connected")
+
+    # Create VAD instance for this session
+    from backend.src.voice.vad import VAD
+    vad = VAD(
+        aggressiveness=config.voice.vad_aggressiveness,
+        silence_timeout_ms=config.voice.silence_timeout_ms,
+    )
+
+    try:
+        while True:
+            data = await websocket.receive()
+
+            if "bytes" in data and data["bytes"]:
+                audio_chunk = data["bytes"]
+
+                # Feed to VAD — returns full utterance when speech ends
+                utterance = vad.process_frame(audio_chunk)
+
+                if utterance is not None:
+                    # Speech ended — process the utterance
+                    logger.info(f"VAD: utterance detected ({len(utterance)} bytes)")
+                    result = await pipeline.process_voice(utterance)
+                    await websocket.send_json(result)
+
+                    # If the result has TTS text, stream audio back
+                    tts_text = result.get("tts_text") or result.get("message", "")
+                    if tts_text and result.get("action") not in ("scan", "start_continuous", "stop_continuous"):
+                        try:
+                            async for chunk in pipeline.speak(tts_text):
+                                await websocket.send_bytes(chunk)
+                            # Send end-of-audio marker
+                            await websocket.send_json({"type": "tts_done"})
+                        except Exception as e:
+                            logger.error(f"TTS streaming error: {e}")
+
+            elif "text" in data and data["text"]:
+                import json
+                try:
+                    cmd = json.loads(data["text"])
+                    if cmd.get("action") == "reset_vad":
+                        vad.reset()
+                        await websocket.send_json({"type": "vad_reset"})
+                except json.JSONDecodeError:
+                    pass
+
+    except WebSocketDisconnect:
+        logger.info("Voice stream client disconnected")
+
+
+# ── WebSocket (Continuous Scan Mode) ──
 
 @app.websocket("/stream")
 async def stream_ws(websocket: WebSocket):
