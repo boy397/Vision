@@ -7,26 +7,34 @@ Uses a registry dict to avoid if/elif chains. Adding a new provider =
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Type
 
-from backend.src.providers.base import BaseLLM, BaseSTT, BaseTTS
+from backend.src.providers.base import BaseLLM, BaseSTT, BaseTTS, BaseProvider
 from backend.src.providers.llm.azure_llm import AzureLLM
 from backend.src.providers.llm.google_llm import GoogleLLM
 from backend.src.providers.llm.groq_llm import GroqLLM
-from backend.src.providers.tts.elevenlabs_tts import ElevenLabsTTS
-from backend.src.providers.tts.sarvam_tts import SarvamTTS
+from backend.src.providers.llm.vllm_llm import VLLMLLM
+
+# STT Providers
 from backend.src.providers.stt.google_stt import GoogleSTT
 from backend.src.providers.stt.sarvam_stt import SarvamSTT
+
+# TTS Providers
+from backend.src.providers.tts.elevenlabs_tts import ElevenLabsTTS
+from backend.src.providers.tts.sarvam_tts import SarvamTTS
 
 if TYPE_CHECKING:
     from backend.src.config import Config
 
-# ── Registry ──
-_REGISTRY: dict[str, dict[str, type]] = {
-    "llm": {"google": GoogleLLM, "azure": AzureLLM, "groq": GroqLLM},
-    "tts": {"elevenlabs": ElevenLabsTTS, "sarvam": SarvamTTS},
-    "stt": {"google": GoogleSTT, "sarvam": SarvamSTT},
-}
+
+class ProviderFactory:
+    """Registry and factory for all AI providers."""
+
+    _PROVIDERS: dict[str, dict[str, Type[BaseProvider]]] = {
+        "llm": {"google": GoogleLLM, "azure": AzureLLM, "groq": GroqLLM, "vllm": VLLMLLM},
+        "tts": {"elevenlabs": ElevenLabsTTS, "sarvam": SarvamTTS},
+        "stt": {"google": GoogleSTT, "sarvam": SarvamSTT},
+    }
 
 
 def create_provider(kind: str, config: Config) -> BaseLLM | BaseTTS | BaseSTT:
@@ -45,17 +53,17 @@ def create_provider(kind: str, config: Config) -> BaseLLM | BaseTTS | BaseSTT:
     Raises:
         ValueError: If kind or provider name is unknown.
     """
-    if kind not in _REGISTRY:
-        raise ValueError(f"Unknown provider kind: {kind}. Available: {list(_REGISTRY.keys())}")
+    if kind not in ProviderFactory._PROVIDERS:
+        raise ValueError(f"Unknown provider kind: {kind}. Available: {list(ProviderFactory._PROVIDERS.keys())}")
 
     section = getattr(config, kind)
     provider_name = section.provider
 
-    cls = _REGISTRY[kind].get(provider_name)
+    cls = ProviderFactory._PROVIDERS[kind].get(provider_name)
     if cls is None:
         raise ValueError(
             f"Unknown {kind} provider: {provider_name}. "
-            f"Available: {list(_REGISTRY[kind].keys())}"
+            f"Available: {list(ProviderFactory._PROVIDERS[kind].keys())}"
         )
 
     # Get provider-specific config dict

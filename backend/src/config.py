@@ -33,6 +33,7 @@ class LLMProviderConfig(BaseModel):
     max_tokens: int = 512
     stream: bool = True
     api_version: str = ""
+    api_base: str = ""
 
 
 class LLMConfig(BaseModel):
@@ -40,6 +41,7 @@ class LLMConfig(BaseModel):
     google: LLMProviderConfig = Field(default_factory=LLMProviderConfig)
     groq: LLMProviderConfig = Field(default_factory=LLMProviderConfig)
     azure: LLMProviderConfig = Field(default_factory=LLMProviderConfig)
+    vllm: LLMProviderConfig = Field(default_factory=LLMProviderConfig)
 
 
 class STTProviderConfig(BaseModel):
@@ -114,17 +116,22 @@ class Config(BaseModel):
     # ── Runtime state (not persisted) ──
     _current_mode: str = "medical"
     _prompts: dict[str, dict] = {}
+    _llm_explicitly_set: bool = False  # True when user explicitly switches via API
 
     def toggle_detection(self, enabled: bool) -> None:
         """Enable or disable YOLO detection at runtime."""
         self.app.detection_enabled = enabled
 
     def toggle_llm(self, provider: str) -> None:
-        """Switch LLM provider at runtime (google | groq | azure)."""
-        allowed = ["google", "groq", "azure"]
+        """Switch LLM provider at runtime (google | groq | azure | vllm).
+
+        Also marks the switch as explicit so mode overrides don't shadow it.
+        """
+        allowed = ["google", "groq", "azure", "vllm"]
         if provider not in allowed:
             raise ValueError(f"Unknown LLM provider: {provider}. Allowed: {allowed}")
         self.llm.provider = provider
+        self._llm_explicitly_set = True
 
     @property
     def current_mode(self) -> str:
@@ -146,8 +153,11 @@ class Config(BaseModel):
         return base
 
     def get_active_llm_model(self) -> str:
-        """Return LLM model for active mode (mode override > global default)."""
-        if self._current_mode in self.modes:
+        """Return LLM model for active mode (mode override > global default).
+
+        If user explicitly switched provider via API, always use the global setting.
+        """
+        if not self._llm_explicitly_set and self._current_mode in self.modes:
             mode_llm = self.modes[self._current_mode].llm
             if "model" in mode_llm:
                 return mode_llm["model"]
@@ -155,8 +165,11 @@ class Config(BaseModel):
         return getattr(self.llm, provider).model
 
     def get_active_llm_provider(self) -> str:
-        """Return LLM provider for active mode (mode override > global default)."""
-        if self._current_mode in self.modes:
+        """Return LLM provider for active mode (mode override > global default).
+
+        If user explicitly switched provider via API, always use the global setting.
+        """
+        if not self._llm_explicitly_set and self._current_mode in self.modes:
             mode_llm = self.modes[self._current_mode].llm
             if "provider" in mode_llm:
                 return mode_llm["provider"]

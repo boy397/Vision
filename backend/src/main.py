@@ -140,10 +140,11 @@ async def debug_stats():
 
 @app.post("/config/llm")
 async def switch_llm_provider(req: LLMProviderRequest):
-    """Switch vision LLM provider at runtime (google | groq).
+    """Switch vision LLM provider at runtime (google | groq | vllm).
 
     google → Gemini 2.0 Flash (fast, accurate, great for Indian text).
     groq   → Llama 4 Scout vision (near-zero latency on Groq hardware).
+    vllm   → Local high-performance LLM deployment.
     """
     config = _get_config()
     pipeline = _get_pipeline()

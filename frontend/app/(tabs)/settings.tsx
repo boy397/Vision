@@ -14,6 +14,7 @@ import api, { type HealthStatus, type Mode } from '@/services/api';
 import { API_BASE } from '@/services/api';
 
 type TTSProvider = 'elevenlabs' | 'sarvam';
+type LLMProvider = 'google' | 'groq' | 'vllm';
 
 export default function SettingsScreen() {
     const [health, setHealth] = useState<HealthStatus | null>(null);
@@ -21,7 +22,7 @@ export default function SettingsScreen() {
     const [mode, setMode] = useState<Mode>('medical');
     const [serverUrl, setServerUrl] = useState(API_BASE);
     const [ttsProvider, setTtsProvider] = useState<TTSProvider>('sarvam');
-    const [llmProvider, setLlmProvider] = useState<'google' | 'groq'>('google');
+    const [llmProvider, setLlmProvider] = useState<LLMProvider>('google');
     const [llmUpdating, setLlmUpdating] = useState(false);
     const [detectionEnabled, setDetectionEnabled] = useState(true);
     const [detectionUpdating, setDetectionUpdating] = useState(false);
@@ -40,7 +41,7 @@ export default function SettingsScreen() {
             setHealth(data);
             setMode(data.mode as Mode);
             setTtsProvider(data.tts_provider as TTSProvider);
-            setLlmProvider(data.llm_provider as 'google' | 'groq');
+            setLlmProvider(data.llm_provider as LLMProvider);
             setDetectionEnabled(data.detection_enabled ?? true);
         } catch (err) {
             setError('Cannot connect to backend');
@@ -93,7 +94,7 @@ export default function SettingsScreen() {
         }
     };
 
-    const handleLLMSwitch = async (provider: 'google' | 'groq') => {
+    const handleLLMSwitch = async (provider: LLMProvider) => {
         setLlmUpdating(true);
         try {
             await api.switchLlmProvider(provider);
@@ -190,10 +191,8 @@ export default function SettingsScreen() {
                         >
                             <Text style={styles.modeBtnIcon}>✨</Text>
                             <View>
-                                <Text style={[styles.modeBtnText, llmProvider === 'google' && styles.modeBtnTextActive]}>
-                                    Gemini
-                                </Text>
-                                <Text style={styles.ttsSubText}>2.0 Flash</Text>
+                                <Text style={[styles.modeBtnText, llmProvider === 'google' && styles.modeBtnTextActive]}>Gemini</Text>
+                                <Text style={styles.ttsSubText}>Flash</Text>
                             </View>
                         </TouchableOpacity>
                         <TouchableOpacity
@@ -203,10 +202,19 @@ export default function SettingsScreen() {
                         >
                             <Text style={styles.modeBtnIcon}>⚡</Text>
                             <View>
-                                <Text style={[styles.modeBtnText, llmProvider === 'groq' && styles.modeBtnTextActive]}>
-                                    Groq
-                                </Text>
-                                <Text style={styles.ttsSubText}>Llama 4 Scout</Text>
+                                <Text style={[styles.modeBtnText, llmProvider === 'groq' && styles.modeBtnTextActive]}>Groq</Text>
+                                <Text style={styles.ttsSubText}>Llama 4</Text>
+                            </View>
+                        </TouchableOpacity>
+                        <TouchableOpacity
+                            style={[styles.modeBtn, llmProvider === 'vllm' && styles.llmBtnActiveVllm]}
+                            onPress={() => handleLLMSwitch('vllm')}
+                            disabled={llmUpdating}
+                        >
+                            <Text style={styles.modeBtnIcon}>🧠</Text>
+                            <View>
+                                <Text style={[styles.modeBtnText, llmProvider === 'vllm' && styles.modeBtnTextActive]}>vLLM</Text>
+                                <Text style={styles.ttsSubText}>Qwen 2.5</Text>
                             </View>
                         </TouchableOpacity>
                     </View>
@@ -344,6 +352,7 @@ const styles = StyleSheet.create({
     ttsSubText: { color: '#55556a', fontSize: 10, marginTop: 1 },
     llmBtnActiveGoogle: { borderColor: '#00b894', backgroundColor: '#00b89411' },
     llmBtnActiveGroq: { borderColor: '#fdcb6e', backgroundColor: '#fdcb6e11' },
+    llmBtnActiveVllm: { borderColor: '#e84393', backgroundColor: '#e8439311' },
     activeModelText: { color: '#55556a', fontSize: 11, marginTop: 8, textAlign: 'center' },
     // Toggle / Pipeline
     toggleRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginTop: 4, marginBottom: 8 },

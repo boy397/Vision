@@ -227,7 +227,7 @@ class VisionAPI {
     return res.json();
   }
 
-  /** Switch LLM vision provider at runtime (google | groq). */
+  /** Switch LLM vision provider at runtime (google | groq | vllm). */
   async switchLlmProvider(provider: string): Promise<any> {
     const res = await this.safeFetch(`${this.base}/config/llm`, {
       method: "POST",
