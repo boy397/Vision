@@ -20,6 +20,9 @@ from backend.src.voice.intent import IntentClassifier, Intent, IntentResult
 from backend.src.utils.image import crop_roi, encode_jpeg, resize_frame
 from backend.src.utils.logging import latency_tracker
 
+import pytesseract
+from PIL import Image
+
 logger = logging.getLogger(__name__)
 
 
@@ -192,17 +195,74 @@ class VisionPipeline:
                 f"[Pipeline] ROI: original={roi.shape}, encoded={len(roi_bytes)} bytes"
             )
 
-        prompt = self.config.get_prompt("vision_system_prompt")
+        # PyTesseract Local OCR (Tier 1 Vision)
+        ocr_text = ""
+        with latency_tracker("local_ocr", logger):
+            try:
+                import os
+                # Windows fallback for Tesseract if not in PATH
+                if os.name == 'nt' and not getattr(pytesseract.pytesseract, 'tesseract_cmd', '').endswith('tesseract.exe'):
+                    default_path = r'C:\Program Files\Tesseract-OCR\tesseract.exe'
+                    if os.path.exists(default_path):
+                        pytesseract.pytesseract.tesseract_cmd = default_path
 
-        with latency_tracker("llm_analyze", logger):
-            analysis = await self.llm.analyze_image(roi_bytes, prompt)
+                # Convert ROI BGR numpy array to PIL Image (RGB)
+                roi_rgb = roi[..., ::-1] # BGR to RGB
+                pil_img = Image.fromarray(roi_rgb)
+                ocr_text = pytesseract.image_to_string(pil_img).strip()
+            except Exception as e:
+                logger.error(f"[Pipeline] PyTesseract Error: {e}")
+
+        # If OCR text found, fast-path with local text processing / SLM prompt
+        if ocr_text and len(ocr_text) > 3:
+            logger.info(f"[Pipeline] Frame #{frame_num}: Local OCR Found Text: {ocr_text[:50]}...")
+            
+            # Send just the OCR text to the LLM as a faster 'text-only' generation
+            prompt = self.config.get_prompt("vision_system_prompt")
+            text_prompt = f"Extract structured data from this OCR text: {ocr_text}\n\nTask:\n{prompt}"
+            
+            # Use Chat API for structured text-to-JSON
+            with latency_tracker("llm_text_analyze", logger):
+                analysis_text = await self.llm.chat({"system_prompt": "You extract structured data from OCR text in JSON format."}, text_prompt)
+                
+                # Robustly parse JSON from Chat model response (stripping markdown)
+                parsed_analysis = None
+                if hasattr(self.llm, "_parse_response"):
+                    parsed_analysis = self.llm._parse_response(analysis_text)
+                else:
+                    try:
+                        import json
+                        # Strip markdown blocks manually
+                        clean_text = analysis_text.strip()
+                        if clean_text.startswith("```"):
+                            lines = clean_text.split("\n")
+                            if lines[0].startswith("```json"):
+                                lines = lines[1:]
+                            else:
+                                lines = lines[1:]
+                            if len(lines) > 0 and lines[-1] == "```":
+                                lines = lines[:-1]
+                            clean_text = "\n".join(lines).strip()
+                        parsed_analysis = json.loads(clean_text)
+                    except Exception:
+                        parsed_analysis = {"raw_response": analysis_text, "parse_error": True}
+                
+                analysis = parsed_analysis
+
+        else:
+            logger.warning(f"[Pipeline] Frame #{frame_num}: Local OCR Failed/Empty. Prompting for realignment.")
+            analysis = {"error": "realign"}
 
         # Mark all detections as tracked/analyzed
         for d in detections:
             self.detector.mark_analyzed(d)
 
         # Generate TTS text from template
-        tts_text = self._format_tts(analysis)
+        if analysis.get("error") == "realign":
+            tts_text = "I couldn't read the text clearly. Please realign the camera."
+        else:
+            tts_text = self._format_tts(analysis)
+        
         self._last_analysis = analysis
         self._last_tts_text = tts_text
 

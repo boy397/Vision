@@ -7,10 +7,7 @@ to detected objects, avoiding redundant re-analysis of the same object.
 from __future__ import annotations
 
 import logging
-<<<<<<< Updated upstream
 import time
-=======
->>>>>>> Stashed changes
 
 import numpy as np
 

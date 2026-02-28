@@ -57,7 +57,9 @@ llm:
 
 # ── STT (Speech-to-Text) ──
 stt:
-  provider: "sarvam"
+  provider: "funasr"
+  funasr:
+    model: "paraformer-zh-streaming" # Paraformer streaming (English/Chinese)
   google:
     model: "latest_long"
     language: "en-IN"

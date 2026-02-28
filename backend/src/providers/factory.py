@@ -17,6 +17,7 @@ from backend.src.providers.tts.elevenlabs_tts import ElevenLabsTTS
 from backend.src.providers.tts.sarvam_tts import SarvamTTS
 from backend.src.providers.stt.google_stt import GoogleSTT
 from backend.src.providers.stt.sarvam_stt import SarvamSTT
+from backend.src.providers.stt.funasr_stt import FunASRSTT
 
 if TYPE_CHECKING:
     from backend.src.config import Config
@@ -25,7 +26,7 @@ if TYPE_CHECKING:
 _REGISTRY: dict[str, dict[str, type]] = {
     "llm": {"google": GoogleLLM, "azure": AzureLLM, "groq": GroqLLM},
     "tts": {"elevenlabs": ElevenLabsTTS, "sarvam": SarvamTTS},
-    "stt": {"google": GoogleSTT, "sarvam": SarvamSTT},
+    "stt": {"google": GoogleSTT, "sarvam": SarvamSTT, "funasr": FunASRSTT},
 }
 
 
