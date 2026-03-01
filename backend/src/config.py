@@ -27,6 +27,13 @@ class DetectionConfig(BaseModel):
     classes: list[str] = Field(default_factory=list)
 
 
+class ModelOption(BaseModel):
+    id: str
+    name: str
+    description: str = ""
+    vision: bool = True
+
+
 class LLMProviderConfig(BaseModel):
     model: str = ""
     temperature: float = 0.3
@@ -34,6 +41,7 @@ class LLMProviderConfig(BaseModel):
     stream: bool = True
     api_version: str = ""
     api_base: str = ""
+    available_models: list[ModelOption] = Field(default_factory=list)
 
 
 class LLMConfig(BaseModel):
@@ -47,7 +55,10 @@ class LLMConfig(BaseModel):
 class STTProviderConfig(BaseModel):
     model: str = ""
     language: str = "en-IN"
+    streaming_model: str = "saaras:v3"    # Used by WebSocket streaming STT
+    streaming_mode: str = "transcribe"    # transcribe | translate | verbatim | codemix
 
+    model_config = {"extra": "allow"}  # Forward-compat: ignore unknown YAML fields
 
 class STTConfig(BaseModel):
     provider: str = "google"
@@ -174,6 +185,28 @@ class Config(BaseModel):
             if "provider" in mode_llm:
                 return mode_llm["provider"]
         return self.llm.provider
+
+    def get_available_models(self, provider: str | None = None) -> list[dict]:
+        """Return available models for a provider (defaults to active provider)."""
+        provider = provider or self.llm.provider
+        provider_cfg = getattr(self.llm, provider, None)
+        if provider_cfg is None:
+            return []
+        return [m.model_dump() for m in provider_cfg.available_models]
+
+    def switch_model(self, provider: str, model_id: str) -> None:
+        """Switch the active model for a given provider."""
+        provider_cfg = getattr(self.llm, provider, None)
+        if provider_cfg is None:
+            raise ValueError(f"Unknown provider: {provider}")
+        # Validate model_id against available_models if list exists
+        if provider_cfg.available_models:
+            valid_ids = [m.id for m in provider_cfg.available_models]
+            if model_id not in valid_ids:
+                raise ValueError(
+                    f"Unknown model: {model_id}. Available: {valid_ids}"
+                )
+        provider_cfg.model = model_id
 
     def get_prompt(self, prompt_type: str = "vision_system_prompt") -> str:
         """Load and return prompt for current mode."""

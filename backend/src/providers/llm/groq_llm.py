@@ -18,8 +18,8 @@ class GroqLLM(BaseLLM):
     def __init__(self, config: dict) -> None:
         super().__init__(config)
         self._client = None
-        # Groq Llama 3 Vision model
-        self._model_name = config.get("model", "llama-3.2-90b-vision-preview")
+        # Active model from config.yml (switchable at runtime)
+        self._model_name = config.get("model", "llama-3.2-11b-vision-preview")
 
     def _get_client(self):
         """Lazy-init Groq client."""
@@ -31,27 +31,47 @@ class GroqLLM(BaseLLM):
             self._client = AsyncGroq(api_key=api_key)
         return self._client
 
-    async def analyze_image(self, image: bytes, prompt: str) -> dict:
-        """Send image + prompt to Groq, return structured JSON."""
+    async def analyze_image(self, image: bytes | list[bytes], prompt: str) -> dict:
+        """Send image(s) + prompt to Groq, return structured JSON.
+
+        Automatically falls back to text-only mode for non-vision models (e.g. Kimi K2).
+        Non-vision models require content to be a plain string, not a content-parts array.
+        """
         try:
             client = self._get_client()
-            b64 = base64.b64encode(image).decode("utf-8")
-            
-            # Use JSON mode if supported, otherwise just parse the text.
+
+            # Check if this model supports vision (image inputs)
+            # config.get("vision", True) — defaults True; set False for text-only models
+            is_vision_model = self.config.get("vision", True)
+
+            if is_vision_model:
+                # Normalize to list for uniform handling
+                images = image if isinstance(image, list) else [image]
+
+                content_parts: list[dict] = [{"type": "text", "text": prompt}]
+                for img in images:
+                    b64 = base64.b64encode(img).decode("utf-8")
+                    content_parts.append({
+                        "type": "image_url",
+                        "image_url": {
+                            "url": f"data:image/jpeg;base64,{b64}"
+                        }
+                    })
+                content: str | list[dict] = content_parts
+            else:
+                # Text-only model — send prompt as plain string, no image parts
+                logger.info(
+                    f"[GroqLLM] Model '{self._model_name}' is text-only — "
+                    "skipping image attachment, sending prompt only."
+                )
+                content = prompt + "\n\n(No image available for this text-only model. Return a JSON object with an explanatory error field.)"
+
             response = await client.chat.completions.create(
                 model=self._model_name,
                 messages=[
                     {
                         "role": "user",
-                        "content": [
-                            {"type": "text", "text": prompt},
-                            {
-                                "type": "image_url",
-                                "image_url": {
-                                    "url": f"data:image/jpeg;base64,{b64}"
-                                }
-                            }
-                        ]
+                        "content": content,
                     }
                 ],
                 temperature=self.config.get("temperature", 0.3),

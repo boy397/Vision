@@ -68,7 +68,20 @@ def create_provider(kind: str, config: Config) -> BaseLLM | BaseTTS | BaseSTT:
 
     # Get provider-specific config dict
     provider_config = getattr(section, provider_name)
-    return cls(provider_config.model_dump() if hasattr(provider_config, "model_dump") else provider_config)
+    config_dict = provider_config.model_dump() if hasattr(provider_config, "model_dump") else dict(provider_config)
+
+    # For LLM providers: inject 'vision' flag based on the active model's capability.
+    # This lets providers detect text-only models (e.g. Kimi K2) at runtime.
+    if kind == "llm" and hasattr(provider_config, "available_models"):
+        active_model_id = config_dict.get("model", "")
+        model_vision = True  # default: assume vision-capable
+        for m in provider_config.available_models:
+            if m.id == active_model_id:
+                model_vision = m.vision
+                break
+        config_dict["vision"] = model_vision
+
+    return cls(config_dict)
 
 
 def create_all_providers(config: Config) -> dict[str, BaseLLM | BaseTTS | BaseSTT]:

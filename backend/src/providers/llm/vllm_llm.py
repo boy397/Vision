@@ -32,12 +32,26 @@ class VLLMLLM(BaseLLM):
             )
         return self._client
 
-    async def analyze_image(self, image: bytes, prompt: str) -> dict[str, Any]:
-        """Send image + prompt to vLLM, return structured JSON."""
+    async def analyze_image(self, image: bytes | list[bytes], prompt: str) -> dict[str, Any]:
+        """Send image(s) + prompt to vLLM, return structured JSON."""
         try:
             client = self._get_client()
-            b64 = base64.b64encode(image).decode("utf-8")
-            
+
+            # Normalize to list for uniform handling
+            images = image if isinstance(image, list) else [image]
+
+            content_parts: list[dict] = [
+                {"type": "text", "text": prompt + "\n\nOutput Valid JSON only."}
+            ]
+            for img in images:
+                b64 = base64.b64encode(img).decode("utf-8")
+                content_parts.append({
+                    "type": "image_url",
+                    "image_url": {
+                        "url": f"data:image/jpeg;base64,{b64}"
+                    }
+                })
+
             # Note: We do not pass response_format={"type": "json_object"} 
             # to maximize compatibility with vanilla vLLM deployments.
             # We rely on prompting and robust parsing instead.
@@ -50,15 +64,7 @@ class VLLMLLM(BaseLLM):
                     },
                     {
                         "role": "user",
-                        "content": [
-                            {"type": "text", "text": prompt + "\n\nOutput Valid JSON only."},
-                            {
-                                "type": "image_url",
-                                "image_url": {
-                                    "url": f"data:image/jpeg;base64,{b64}"
-                                }
-                            }
-                        ]
+                        "content": content_parts,
                     }
                 ],
                 temperature=self.config.get("temperature", 0.0), # Low temperature for JSON consistency

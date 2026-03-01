@@ -30,25 +30,26 @@ class GoogleLLM(BaseLLM):
             self._client = genai.Client(api_key=api_key)
         return self._client
 
-    async def analyze_image(self, image: bytes, prompt: str) -> dict:
-        """Send image + prompt to Gemini Vision, return structured JSON."""
+    async def analyze_image(self, image: bytes | list[bytes], prompt: str) -> dict:
+        """Send image(s) + prompt to Gemini Vision, return structured JSON."""
         try:
             client = self._get_client()
             from google.genai import types
 
-            b64 = base64.b64encode(image).decode()
+            # Normalize to list for uniform handling
+            images = image if isinstance(image, list) else [image]
+
+            parts = [types.Part(text=prompt)]
+            for img in images:
+                b64 = base64.b64encode(img).decode()
+                parts.append(types.Part(inline_data=types.Blob(
+                    mime_type="image/jpeg",
+                    data=b64
+                )))
 
             response = client.models.generate_content(
                 model=self._model_name,
-                contents=[
-                    types.Content(parts=[
-                        types.Part(text=prompt),
-                        types.Part(inline_data=types.Blob(
-                            mime_type="image/jpeg",
-                            data=b64
-                        )),
-                    ]),
-                ],
+                contents=[types.Content(parts=parts)],
                 config=types.GenerateContentConfig(
                     temperature=self.config.get("temperature", 0.3),
                     max_output_tokens=self.config.get("max_tokens", 512),

@@ -10,7 +10,7 @@ import {
     ActivityIndicator,
     Switch,
 } from 'react-native';
-import api, { type HealthStatus, type Mode } from '@/services/api';
+import api, { type HealthStatus, type Mode, type ModelOption } from '@/services/api';
 import { API_BASE } from '@/services/api';
 
 type TTSProvider = 'elevenlabs' | 'sarvam';
@@ -22,12 +22,15 @@ export default function SettingsScreen() {
     const [mode, setMode] = useState<Mode>('medical');
     const [serverUrl, setServerUrl] = useState(API_BASE);
     const [ttsProvider, setTtsProvider] = useState<TTSProvider>('sarvam');
-    const [llmProvider, setLlmProvider] = useState<LLMProvider>('google');
+    const [llmProvider, setLlmProvider] = useState<LLMProvider>('groq');
     const [llmUpdating, setLlmUpdating] = useState(false);
     const [detectionEnabled, setDetectionEnabled] = useState(true);
     const [detectionUpdating, setDetectionUpdating] = useState(false);
     const [error, setError] = useState<string | null>(null);
     const [ttsUpdating, setTtsUpdating] = useState(false);
+    const [availableModels, setAvailableModels] = useState<ModelOption[]>([]);
+    const [activeModel, setActiveModel] = useState<string>('');
+    const [modelSwitching, setModelSwitching] = useState<string | null>(null); // model id being switched to
 
     useEffect(() => {
         checkHealth();
@@ -43,6 +46,10 @@ export default function SettingsScreen() {
             setTtsProvider(data.tts_provider as TTSProvider);
             setLlmProvider(data.llm_provider as LLMProvider);
             setDetectionEnabled(data.detection_enabled ?? true);
+            setActiveModel(data.llm_model ?? '');
+            if (data.available_models) {
+                setAvailableModels(data.available_models);
+            }
         } catch (err) {
             setError('Cannot connect to backend');
             setHealth(null);
@@ -97,13 +104,32 @@ export default function SettingsScreen() {
     const handleLLMSwitch = async (provider: LLMProvider) => {
         setLlmUpdating(true);
         try {
-            await api.switchLlmProvider(provider);
+            const result = await api.switchLlmProvider(provider);
             setLlmProvider(provider);
-            await checkHealth(); // Refresh to get updated model name
+            if (result.available_models) {
+                setAvailableModels(result.available_models);
+            }
+            setActiveModel(result.llm_model ?? '');
+            await checkHealth();
         } catch (err) {
             setError('Failed to switch vision model');
         } finally {
             setLlmUpdating(false);
+        }
+    };
+
+    const handleModelSwitch = async (modelId: string) => {
+        if (modelId === activeModel) return;
+        setModelSwitching(modelId);
+        try {
+            const result = await api.switchLlmModel(llmProvider, modelId);
+            if (result.status === 'ok') {
+                setActiveModel(modelId);
+            }
+        } catch (err) {
+            setError('Failed to switch model');
+        } finally {
+            setModelSwitching(null);
         }
     };
 
@@ -176,13 +202,13 @@ export default function SettingsScreen() {
                     </View>
                 </View>
 
-                {/* Vision Model */}
+                {/* Vision Model Provider */}
                 <View style={styles.card}>
                     <View style={styles.cardHeader}>
                         <Text style={styles.cardTitle}>Vision Model</Text>
                         {llmUpdating && <ActivityIndicator color="#6c5ce7" size="small" />}
                     </View>
-                    <Text style={styles.cardSub}>Choose LLM for image analysis (Tier 2)</Text>
+                    <Text style={styles.cardSub}>Choose LLM provider for image analysis</Text>
                     <View style={styles.modeRow}>
                         <TouchableOpacity
                             style={[styles.modeBtn, llmProvider === 'google' && styles.llmBtnActiveGoogle]}
@@ -190,10 +216,7 @@ export default function SettingsScreen() {
                             disabled={llmUpdating}
                         >
                             <Text style={styles.modeBtnIcon}>✨</Text>
-                            <View>
-                                <Text style={[styles.modeBtnText, llmProvider === 'google' && styles.modeBtnTextActive]}>Gemini</Text>
-                                <Text style={styles.ttsSubText}>Flash</Text>
-                            </View>
+                            <Text style={[styles.modeBtnText, llmProvider === 'google' && styles.modeBtnTextActive]}>Gemini</Text>
                         </TouchableOpacity>
                         <TouchableOpacity
                             style={[styles.modeBtn, llmProvider === 'groq' && styles.llmBtnActiveGroq]}
@@ -201,10 +224,7 @@ export default function SettingsScreen() {
                             disabled={llmUpdating}
                         >
                             <Text style={styles.modeBtnIcon}>⚡</Text>
-                            <View>
-                                <Text style={[styles.modeBtnText, llmProvider === 'groq' && styles.modeBtnTextActive]}>Groq</Text>
-                                <Text style={styles.ttsSubText}>Llama 4</Text>
-                            </View>
+                            <Text style={[styles.modeBtnText, llmProvider === 'groq' && styles.modeBtnTextActive]}>Groq</Text>
                         </TouchableOpacity>
                         <TouchableOpacity
                             style={[styles.modeBtn, llmProvider === 'vllm' && styles.llmBtnActiveVllm]}
@@ -212,16 +232,60 @@ export default function SettingsScreen() {
                             disabled={llmUpdating}
                         >
                             <Text style={styles.modeBtnIcon}>🧠</Text>
-                            <View>
-                                <Text style={[styles.modeBtnText, llmProvider === 'vllm' && styles.modeBtnTextActive]}>vLLM</Text>
-                                <Text style={styles.ttsSubText}>Qwen 2.5</Text>
-                            </View>
+                            <Text style={[styles.modeBtnText, llmProvider === 'vllm' && styles.modeBtnTextActive]}>vLLM</Text>
                         </TouchableOpacity>
                     </View>
-                    {health?.llm_model && (
-                        <Text style={styles.activeModelText}>Active: {health.llm_model}</Text>
-                    )}
                 </View>
+
+                {/* Model Picker — driven by config.yml available_models */}
+                {availableModels.length > 0 && (
+                    <View style={styles.card}>
+                        <Text style={styles.cardTitle}>
+                            {llmProvider === 'groq' ? '⚡' : llmProvider === 'google' ? '✨' : '🧠'}{' '}
+                            {llmProvider.charAt(0).toUpperCase() + llmProvider.slice(1)} Models
+                        </Text>
+                        <Text style={styles.cardSub}>
+                            Tap to switch • defined in config.yml
+                        </Text>
+                        {availableModels.map((m) => {
+                            const isActive = m.id === activeModel;
+                            const isSwitching = modelSwitching === m.id;
+                            return (
+                                <TouchableOpacity
+                                    key={m.id}
+                                    style={[
+                                        styles.modelItem,
+                                        isActive && styles.modelItemActive,
+                                    ]}
+                                    onPress={() => handleModelSwitch(m.id)}
+                                    disabled={isSwitching || isActive}
+                                >
+                                    <View style={styles.modelInfo}>
+                                        <View style={styles.modelNameRow}>
+                                            <Text style={[styles.modelName, isActive && styles.modelNameActive]}>
+                                                {m.name}
+                                            </Text>
+                                            {m.vision && (
+                                                <View style={styles.visionBadge}>
+                                                    <Text style={styles.visionBadgeText}>👁 vision</Text>
+                                                </View>
+                                            )}
+                                        </View>
+                                        <Text style={styles.modelDesc}>{m.description}</Text>
+                                        <Text style={styles.modelId}>{m.id}</Text>
+                                    </View>
+                                    {isSwitching ? (
+                                        <ActivityIndicator color="#6c5ce7" size="small" />
+                                    ) : isActive ? (
+                                        <View style={styles.activeDot} />
+                                    ) : (
+                                        <View style={styles.inactiveDot} />
+                                    )}
+                                </TouchableOpacity>
+                            );
+                        })}
+                    </View>
+                )}
 
                 {/* Pipeline Config */}
                 <View style={styles.card}>
@@ -353,7 +417,38 @@ const styles = StyleSheet.create({
     llmBtnActiveGoogle: { borderColor: '#00b894', backgroundColor: '#00b89411' },
     llmBtnActiveGroq: { borderColor: '#fdcb6e', backgroundColor: '#fdcb6e11' },
     llmBtnActiveVllm: { borderColor: '#e84393', backgroundColor: '#e8439311' },
-    activeModelText: { color: '#55556a', fontSize: 11, marginTop: 8, textAlign: 'center' },
+    // Model picker
+    modelItem: {
+        flexDirection: 'row',
+        alignItems: 'center',
+        justifyContent: 'space-between',
+        paddingVertical: 12,
+        paddingHorizontal: 14,
+        backgroundColor: '#1a1a2e',
+        borderRadius: 12,
+        marginBottom: 8,
+        borderWidth: 1.5,
+        borderColor: 'rgba(255,255,255,0.04)',
+    },
+    modelItemActive: {
+        borderColor: '#fdcb6e',
+        backgroundColor: '#fdcb6e08',
+    },
+    modelInfo: { flex: 1, marginRight: 12 },
+    modelNameRow: { flexDirection: 'row', alignItems: 'center', gap: 8 },
+    modelName: { color: '#8888a0', fontSize: 14, fontWeight: '600' },
+    modelNameActive: { color: '#f0f0f5' },
+    modelDesc: { color: '#55556a', fontSize: 11, marginTop: 2 },
+    modelId: { color: '#33334a', fontSize: 10, marginTop: 2, fontFamily: 'monospace' },
+    visionBadge: {
+        backgroundColor: '#6c5ce722',
+        paddingHorizontal: 6,
+        paddingVertical: 2,
+        borderRadius: 6,
+    },
+    visionBadgeText: { color: '#6c5ce7', fontSize: 9, fontWeight: '600' },
+    activeDot: { width: 12, height: 12, borderRadius: 6, backgroundColor: '#fdcb6e' },
+    inactiveDot: { width: 12, height: 12, borderRadius: 6, borderWidth: 1.5, borderColor: '#33334a' },
     // Toggle / Pipeline
     toggleRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginTop: 4, marginBottom: 8 },
     toggleInfo: { flex: 1, marginRight: 12 },

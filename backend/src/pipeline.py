@@ -100,12 +100,18 @@ class VisionPipeline:
 
     # ── Frame Processing (Tier 1 + Tier 2) ──
 
-    async def process_frame(self, frame: np.ndarray, force: bool = False) -> PipelineResult:
-        """Process a single frame through the full pipeline.
+    async def process_frame(
+        self,
+        frame: np.ndarray,
+        force: bool = False,
+        extra_frames: list[np.ndarray] | None = None,
+    ) -> PipelineResult:
+        """Process one or more frames through the full pipeline.
 
         Args:
-            frame: BGR image as numpy array.
+            frame: Primary BGR image as numpy array.
             force: If True, skip state change check (for triggered scans).
+            extra_frames: Additional frames captured at 1s intervals for multi-frame analysis.
         """
         frame_start = time.perf_counter()
         self._total_frames += 1
@@ -114,24 +120,41 @@ class VisionPipeline:
         det_config = self.config.get_active_detection()
         detection_enabled = self.config.app.detection_enabled
 
+        all_frames = [frame] + (extra_frames or [])
+        num_frames = len(all_frames)
+
         logger.debug(
             f"[Pipeline] Frame #{frame_num}: shape={frame.shape}, "
-            f"mode={mode}, force={force}, detection_enabled={detection_enabled}"
+            f"mode={mode}, force={force}, detection_enabled={detection_enabled}, "
+            f"total_frames_in_batch={num_frames}"
         )
 
-        # ── Path A: YOLO disabled — send full frame straight to LLM ──
+        # ── Encode all frames for multi-image LLM analysis ──
+        def _encode_all_frames(frames: list[np.ndarray]) -> bytes | list[bytes]:
+            """Encode frames — returns single bytes if 1 frame, list if multiple."""
+            encoded = [encode_jpeg(resize_frame(f)) for f in frames]
+            return encoded[0] if len(encoded) == 1 else encoded
+
+        # ── Path A: YOLO disabled — send full frame(s) straight to LLM ──
         if not detection_enabled:
             logger.info(
                 f"[Pipeline] Frame #{frame_num}: YOLO DISABLED — direct to LLM "
-                f"(using {type(self.llm).__name__}, config says '{self.config.get_active_llm_provider()}')"
+                f"(using {type(self.llm).__name__}, config says '{self.config.get_active_llm_provider()}') "
+                f"[{num_frames} frame(s)]"
             )
             prompt = self.config.get_prompt("vision_system_prompt")
+            if num_frames > 1:
+                prompt += f"\n\nYou are receiving {num_frames} images of the same object taken ~1 second apart. Use all images to get the best reading of text, labels, and details."
+
             with latency_tracker("roi_encode", logger):
-                frame_bytes = encode_jpeg(resize_frame(frame))
-                logger.debug(f"[Pipeline] Full frame encoded: {len(frame_bytes)} bytes")
+                image_data = _encode_all_frames(all_frames)
+                if isinstance(image_data, list):
+                    logger.debug(f"[Pipeline] Encoded {len(image_data)} frames: {[len(b) for b in image_data]} bytes")
+                else:
+                    logger.debug(f"[Pipeline] Full frame encoded: {len(image_data)} bytes")
 
             with latency_tracker("llm_analyze", logger):
-                analysis = await self.llm.analyze_image(frame_bytes, prompt)
+                analysis = await self.llm.analyze_image(image_data, prompt)
 
             # Log LLM output for debugging
             logger.info(
@@ -225,16 +248,24 @@ class VisionPipeline:
         )
 
         with latency_tracker("roi_crop", logger):
-            roi = crop_roi(frame, best_det.bbox)
-            roi_bytes = encode_jpeg(resize_frame(roi))
+            # Crop ROI from all frames at the same bbox location
+            roi_images: list[bytes] = []
+            for f in all_frames:
+                roi = crop_roi(f, best_det.bbox)
+                roi_images.append(encode_jpeg(resize_frame(roi)))
             logger.debug(
-                f"[Pipeline] ROI: original={roi.shape}, encoded={len(roi_bytes)} bytes"
+                f"[Pipeline] ROI: {len(roi_images)} frame(s), sizes={[len(b) for b in roi_images]} bytes"
             )
 
         prompt = self.config.get_prompt("vision_system_prompt")
+        if num_frames > 1:
+            prompt += f"\n\nYou are receiving {num_frames} images of the same object taken ~1 second apart. Use all images to get the best reading of text, labels, and details."
+
+        # Send single or multi-image to LLM
+        image_for_llm: bytes | list[bytes] = roi_images[0] if len(roi_images) == 1 else roi_images
 
         with latency_tracker("llm_analyze", logger):
-            analysis = await self.llm.analyze_image(roi_bytes, prompt)
+            analysis = await self.llm.analyze_image(image_for_llm, prompt)
 
         # Mark all detections as tracked/analyzed
         for d in detections:
@@ -444,13 +475,15 @@ class VisionPipeline:
         parts = []
         currency = data.get("currency", {})
         product = data.get("product", {})
+        detected_items = data.get("detected_items", [])
+        scene_description = data.get("scene_description", "")
 
         if data.get("item_type") == "currency_note" and currency:
             denom = currency.get("denomination", "")
             parts.append(f"I can see a {denom} rupee note.")
             if currency.get("count", 1) > 1:
                 parts.append(f"There are {currency['count']} notes, totaling {currency['total_value']} rupees.")
-        elif product:
+        elif data.get("item_type") == "product" and product:
             name = f"{product.get('brand', '')} {product.get('name', '')}".strip()
             if name:
                 parts.append(f"This is {name}.")
@@ -460,6 +493,18 @@ class VisionPipeline:
                 parts.append(f"Expiry: {product['expiry_date']}.")
             if product.get("price"):
                 parts.append(f"Price: {product['price']} rupees.")
+        elif detected_items and isinstance(detected_items, list):
+            # General object detection
+            if scene_description:
+                parts.append(scene_description)
+            for item in detected_items[:5]:  # Limit to 5 items for TTS
+                if isinstance(item, dict):
+                    item_name = item.get("name", "")
+                    color = item.get("color", "")
+                    desc = f"I can see a {color} {item_name}." if color else f"I can see a {item_name}."
+                    parts.append(desc.strip())
+        elif scene_description:
+            parts.append(scene_description)
         return parts
 
     @property

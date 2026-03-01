@@ -11,6 +11,7 @@ const MAPPING = {
   'camera.fill': 'photo-camera',
   'mic.fill': 'mic',
   'gearshape.fill': 'settings',
+  'viewfinder': 'center-focus-strong',
 } as const;
 
 type IconSymbolName = keyof typeof MAPPING;

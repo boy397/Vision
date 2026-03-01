@@ -31,27 +31,31 @@ class AzureLLM(BaseLLM):
             )
         return self._client
 
-    async def analyze_image(self, image: bytes, prompt: str) -> dict:
-        """Send image + prompt to Azure OpenAI Vision."""
+    async def analyze_image(self, image: bytes | list[bytes], prompt: str) -> dict:
+        """Send image(s) + prompt to Azure OpenAI Vision."""
         try:
             client = self._get_client()
-            b64 = base64.b64encode(image).decode()
+
+            # Normalize to list for uniform handling
+            images = image if isinstance(image, list) else [image]
+
+            content_parts: list[dict] = [{"type": "text", "text": prompt}]
+            for img in images:
+                b64 = base64.b64encode(img).decode()
+                content_parts.append({
+                    "type": "image_url",
+                    "image_url": {
+                        "url": f"data:image/jpeg;base64,{b64}",
+                        "detail": "high",
+                    },
+                })
 
             response = await client.chat.completions.create(
                 model=self._model,
                 messages=[
                     {
                         "role": "user",
-                        "content": [
-                            {"type": "text", "text": prompt},
-                            {
-                                "type": "image_url",
-                                "image_url": {
-                                    "url": f"data:image/jpeg;base64,{b64}",
-                                    "detail": "high",
-                                },
-                            },
-                        ],
+                        "content": content_parts,
                     }
                 ],
                 temperature=self.config.get("temperature", 0.3),

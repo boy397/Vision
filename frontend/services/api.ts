@@ -7,6 +7,8 @@
 export const API_BASE = "https://fluent-supersecularly-jefferson.ngrok-free.dev";
 export const WS_URL = "wss://fluent-supersecularly-jefferson.ngrok-free.dev/stream";
 export const VOICE_WS_URL = "wss://fluent-supersecularly-jefferson.ngrok-free.dev/voice/stream";
+/** New: true Sarvam WebSocket streaming pipeline (STT + TTS via Sarvam WS APIs). */
+export const SARVAM_WS_URL = "wss://fluent-supersecularly-jefferson.ngrok-free.dev/voice/sarvam";
 
 export type Mode = "medical" | "retail";
 
@@ -34,6 +36,13 @@ export interface VoiceResult {
   response?: string;
 }
 
+export interface ModelOption {
+  id: string;
+  name: string;
+  description: string;
+  vision: boolean;
+}
+
 export interface HealthStatus {
   status: string;
   mode: string;
@@ -42,6 +51,7 @@ export interface HealthStatus {
   tts_provider: string;
   stt_provider: string;
   detection_enabled: boolean;
+  available_models?: ModelOption[];
   detector_stats?: Record<string, any>;
 }
 
@@ -49,6 +59,12 @@ export interface DebugStats {
   detector: Record<string, any>;
   pipeline: Record<string, any>;
   tts?: Record<string, any>;
+}
+
+export interface DetectResult {
+  detections: Detection[];
+  elapsed_ms: number;
+  frame_shape: [number, number]; // [height, width]
 }
 
 // ── API Client ──
@@ -114,6 +130,22 @@ class VisionAPI {
     return res.json();
   }
 
+  /** Lightweight YOLO detection + tracking only (no LLM). Fast ~30-50ms. */
+  async detectObjects(imageUri: string): Promise<DetectResult> {
+    const formData = new FormData();
+    formData.append("image", {
+      uri: imageUri,
+      type: "image/jpeg",
+      name: "frame.jpg",
+    } as any);
+
+    const res = await this.safeFetch(`${this.base}/detect`, {
+      method: "POST",
+      body: formData,
+    });
+    return res.json();
+  }
+
   async switchMode(
     mode: Mode,
   ): Promise<{ status: string; mode: string; message: string }> {
@@ -169,6 +201,37 @@ class VisionAPI {
     console.log(`[API] scanFromUri LLM analysis:`, JSON.stringify(data.analysis || {}).substring(0, 500));
     console.log(`[API] scanFromUri tts_text: "${data.tts_text || '(empty)'}"`);
     if (data.mode) console.log(`[API] scanFromUri mode: ${data.mode}`);
+
+    return data;
+  }
+
+  /** Send multiple images (dual-frame capture) to the backend for analysis. */
+  async scanMultipleFromUri(imageUris: string[]): Promise<ScanResult> {
+    const start = Date.now();
+    console.log(`[API] scanMultipleFromUri: ${imageUris.length} images...`);
+
+    const formData = new FormData();
+    imageUris.forEach((uri, idx) => {
+      formData.append("images", {
+        uri,
+        type: "image/jpeg",
+        name: `capture_${idx}.jpg`,
+      } as any);
+    });
+
+    const res = await this.safeFetch(`${this.base}/scan`, {
+      method: "POST",
+      body: formData,
+    });
+
+    const data = await res.json();
+    const elapsed = Date.now() - start;
+
+    console.log(
+      `[API] scanMultipleFromUri: ${elapsed}ms, ` +
+      `${data.detections?.length || 0} detections, ` +
+      `tts_len=${data.tts_text?.length || 0}`,
+    );
 
     return data;
   }
@@ -233,6 +296,25 @@ class VisionAPI {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ provider }),
+    });
+    return res.json();
+  }
+
+  /** Get available models for a provider. */
+  async getLlmModels(provider?: string): Promise<{ provider: string; active_model: string; models: ModelOption[] }> {
+    const url = provider
+      ? `${this.base}/config/llm/models?provider=${provider}`
+      : `${this.base}/config/llm/models`;
+    const res = await this.safeFetch(url);
+    return res.json();
+  }
+
+  /** Switch model within a provider. */
+  async switchLlmModel(provider: string, model: string): Promise<any> {
+    const res = await this.safeFetch(`${this.base}/config/llm/model`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ provider, model }),
     });
     return res.json();
   }

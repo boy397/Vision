@@ -29,6 +29,13 @@ export default function TabLayout() {
         }}
       />
       <Tabs.Screen
+        name="detect"
+        options={{
+          title: 'Detect',
+          tabBarIcon: ({ color }) => <IconSymbol size={28} name="viewfinder" color={color} />,
+        }}
+      />
+      <Tabs.Screen
         name="voice"
         options={{
           title: 'Voice',

@@ -5,6 +5,7 @@ Includes comprehensive debug logging for bottleneck identification.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
 from contextlib import asynccontextmanager
@@ -95,7 +96,12 @@ class DetectionToggleRequest(BaseModel):
 
 
 class LLMProviderRequest(BaseModel):
-    provider: str  # google | groq | azure
+    provider: str  # google | groq | azure | vllm
+
+
+class LLMModelRequest(BaseModel):
+    provider: str
+    model: str
 
 
 # ── REST Endpoints ──
@@ -105,14 +111,16 @@ async def health():
     """Health check."""
     config = _get_config()
     pipeline = _get_pipeline()
+    active_provider = config.get_active_llm_provider()
     return {
         "status": "ok",
         "mode": config.current_mode,
-        "llm_provider": config.get_active_llm_provider(),
-        "llm_model": getattr(getattr(config.llm, config.get_active_llm_provider(), None), "model", "?"),
+        "llm_provider": active_provider,
+        "llm_model": getattr(getattr(config.llm, active_provider, None), "model", "?"),
         "tts_provider": config.tts.provider,
         "stt_provider": config.stt.provider,
         "detection_enabled": config.app.detection_enabled,
+        "available_models": config.get_available_models(active_provider),
         "detector_stats": pipeline.detector.stats,
     }
 
@@ -138,12 +146,27 @@ async def debug_stats():
     return stats
 
 
+@app.get("/config/llm/models")
+async def get_llm_models(provider: str | None = None):
+    """Get available models for a provider (defaults to active provider).
+
+    Returns the list from config.yml — add models there and they show up here.
+    """
+    config = _get_config()
+    provider = provider or config.get_active_llm_provider()
+    return {
+        "provider": provider,
+        "active_model": getattr(getattr(config.llm, provider, None), "model", "?"),
+        "models": config.get_available_models(provider),
+    }
+
+
 @app.post("/config/llm")
 async def switch_llm_provider(req: LLMProviderRequest):
     """Switch vision LLM provider at runtime (google | groq | vllm).
 
-    google → Gemini 2.0 Flash (fast, accurate, great for Indian text).
-    groq   → Llama 4 Scout vision (near-zero latency on Groq hardware).
+    google → Gemini Flash (fast, accurate, great for Indian text).
+    groq   → Llama Vision / Kimi K2 (near-zero latency on Groq hardware).
     vllm   → Local high-performance LLM deployment.
     """
     config = _get_config()
@@ -159,7 +182,34 @@ async def switch_llm_provider(req: LLMProviderRequest):
             "status": "ok",
             "llm_provider": req.provider,
             "llm_model": model,
+            "available_models": config.get_available_models(req.provider),
             "message": f"Vision LLM switched to {req.provider} ({model})",
+        }
+    except ValueError as e:
+        return JSONResponse(status_code=400, content={"error": str(e)})
+
+
+@app.post("/config/llm/model")
+async def switch_llm_model(req: LLMModelRequest):
+    """Switch the active model within an LLM provider.
+
+    Models are defined in config.yml under each provider's `available_models`.
+    """
+    config = _get_config()
+    pipeline = _get_pipeline()
+    try:
+        config.switch_model(req.provider, req.model)
+        # Also ensure this provider is active
+        config.toggle_llm(req.provider)
+        # Re-create LLM instance with new model
+        from backend.src.providers.factory import create_provider
+        pipeline.llm = create_provider("llm", config)
+        logger.info(f"[/config/llm/model] Switched to: {req.provider} / {req.model}")
+        return {
+            "status": "ok",
+            "llm_provider": req.provider,
+            "llm_model": req.model,
+            "message": f"Model switched to {req.model}",
         }
     except ValueError as e:
         return JSONResponse(status_code=400, content={"error": str(e)})
@@ -200,27 +250,82 @@ async def switch_mode(req: ModeSwitchRequest):
         return JSONResponse(status_code=400, content={"error": str(e)})
 
 
-@app.post("/scan")
-async def scan_image(image: UploadFile = File(...)):
-    """Upload an image for one-shot scan + analysis.
+@app.post("/detect")
+async def detect_only(image: UploadFile = File(...)):
+    """Lightweight YOLO detection + tracking only (no LLM).
 
-    Returns detection results, LLM analysis, and TTS text.
+    Returns bounding boxes with persistent track IDs.
+    Designed for continuous real-time tracking at high FPS (~30-50ms per frame).
     """
     pipeline = _get_pipeline()
     start = time.perf_counter()
 
     contents = await image.read()
-    logger.debug(f"[/scan] Received image: {len(contents)} bytes")
-
     nparr = np.frombuffer(contents, np.uint8)
     frame = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
 
     if frame is None:
-        logger.warning("[/scan] Failed to decode image")
         return JSONResponse(status_code=400, content={"error": "Could not decode image"})
 
-    logger.debug(f"[/scan] Decoded frame: {frame.shape}")
-    result = await pipeline.process_frame(frame, force=True)
+    det_config = pipeline.config.get_active_detection()
+    detections = pipeline.detector.detect(
+        frame,
+        confidence=det_config.confidence,
+        filter_classes=None,  # No class filter — detect everything
+    )
+
+    elapsed_ms = (time.perf_counter() - start) * 1000
+    det_dicts = [d.to_dict() for d in detections]
+
+    logger.debug(
+        f"[/detect] {len(det_dicts)} objects in {elapsed_ms:.0f}ms"
+    )
+
+    return {
+        "detections": det_dicts,
+        "elapsed_ms": round(elapsed_ms, 1),
+        "frame_shape": list(frame.shape[:2]),  # [height, width]
+    }
+
+
+@app.post("/scan")
+async def scan_image(
+    image: UploadFile | None = File(None),
+    images: list[UploadFile] = File(default=[]),
+):
+    """Upload one or more images for scan + analysis.
+
+    Supports both single image (legacy) and multi-image (new dual-frame capture).
+    Returns detection results, LLM analysis, and TTS text.
+    """
+    pipeline = _get_pipeline()
+    start = time.perf_counter()
+
+    # Collect all uploaded files
+    upload_files: list[UploadFile] = []
+    if images:
+        upload_files = images
+    elif image:
+        upload_files = [image]
+    else:
+        return JSONResponse(status_code=400, content={"error": "No image provided"})
+
+    frames = []
+    for i, img_file in enumerate(upload_files):
+        contents = await img_file.read()
+        logger.debug(f"[/scan] Image {i+1}: {len(contents)} bytes")
+        nparr = np.frombuffer(contents, np.uint8)
+        frame = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+        if frame is None:
+            logger.warning(f"[/scan] Failed to decode image {i+1}")
+            continue
+        frames.append(frame)
+
+    if not frames:
+        return JSONResponse(status_code=400, content={"error": "Could not decode any image"})
+
+    logger.debug(f"[/scan] Decoded {len(frames)} frame(s): shapes={[f.shape for f in frames]}")
+    result = await pipeline.process_frame(frames[0], force=True, extra_frames=frames[1:])
 
     elapsed_ms = (time.perf_counter() - start) * 1000
     logger.info(
@@ -416,6 +521,263 @@ async def text_to_speech(req: TTSRequest):
         )
 
     return StreamingResponse(audio_stream(), media_type="audio/mpeg")
+
+
+# ── WebSocket (Sarvam Streaming STT + TTS — Ultra Low Latency) ──
+
+@app.websocket("/voice/sarvam")
+async def voice_sarvam_ws(websocket: WebSocket):
+    """Ultra-low-latency voice pipeline using Sarvam's real WebSocket APIs.
+
+    Frontend sends:
+      - binary: WAV audio chunks (16-bit PCM, 16kHz, mono)
+        Each binary message should be a complete or partial WAV clip.
+        On mic release/VAD trigger, the frontend sends a text message {"action":"flush"}
+      - text JSON: {"action":"flush"} to force STT to process buffered audio
+      - text JSON: {"action":"ping"} for keepalive
+      - text JSON: {"action":"scan_result","frame_b64":"..."} when user says scan —
+        frontend takes a photo and sends it here for vision analysis
+
+    Server sends:
+      - text JSON: {"type":"transcript","text":"..."} incremental/final transcript
+      - text JSON: {"type":"intent","action":"...","text":"..."} voice command result
+      - binary: raw MP3 audio chunks (TTS response) — play immediately as they arrive
+      - text JSON: {"type":"tts_done"} after all TTS audio sent
+      - text JSON: {"type":"scan_result","detections":[...],"analysis":{...},"tts_text":"..."}
+      - text JSON: {"type":"pong"} in reply to ping
+
+    Architecture:
+      Phone WAV → Sarvam STT WS (saaras:v3) → Intent classify
+        ├─ if scan → take photo (frontend) → vision LLM → Sarvam TTS WS → MP3 chunks
+        ├─ if followup/repeat → LLM chat → Sarvam TTS WS → MP3 chunks
+        └─ else → Sarvam TTS WS for ack → MP3 chunks
+    """
+    await websocket.accept()
+    pipeline = _get_pipeline()
+    cfg = _get_config()
+    logger.info("[WS /voice/sarvam] 🟢 Client connected")
+
+    session_start = time.time()
+    total_utterances = 0
+
+    # Lazy import streaming providers
+    from backend.src.providers.stt.sarvam_stt_streaming import SarvamStreamingSTT
+    from backend.src.providers.tts.sarvam_tts_streaming import SarvamStreamingTTS
+
+    stt_config = cfg.stt.sarvam.model_dump() if hasattr(cfg.stt, "sarvam") else {}
+    tts_config = cfg.tts.sarvam.model_dump() if hasattr(cfg.tts, "sarvam") else {}
+
+    streaming_tts = SarvamStreamingTTS(tts_config)
+
+    # Audio accumulation buffer — collect chunks between flush signals
+    audio_buffer: list[bytes] = []
+    # Queue for photo frames sent by the frontend for scan processing
+    scan_queue: asyncio.Queue = asyncio.Queue()
+
+    async def stream_tts_response(text: str) -> None:
+        """Stream TTS audio chunks back to the client via the WebSocket."""
+        if not text:
+            return
+        tts_start = time.perf_counter()
+        tts_chunks = 0
+        tts_bytes = 0
+        try:
+            async for chunk in streaming_tts.synthesize(text):
+                await websocket.send_bytes(chunk)
+                tts_chunks += 1
+                tts_bytes += len(chunk)
+        except Exception as e:
+            logger.error(f"[WS /voice/sarvam] TTS streaming error: {e}")
+        finally:
+            await websocket.send_json({"type": "tts_done"})
+            tts_ms = (time.perf_counter() - tts_start) * 1000
+            logger.info(
+                f"[WS /voice/sarvam] TTS: {tts_chunks} chunks, "
+                f"{tts_bytes} bytes, {tts_ms:.0f}ms"
+            )
+
+    async def process_utterance(audio_bytes: bytes) -> None:
+        """Transcribe a complete utterance via Sarvam streaming STT and handle intent."""
+        nonlocal total_utterances
+        total_utterances += 1
+        utt_num = total_utterances
+
+        logger.info(
+            f"[WS /voice/sarvam] 🎙️ Utterance #{utt_num}: "
+            f"{len(audio_bytes)} bytes → STT (WS)"
+        )
+
+        # Use the one-shot streaming STT session (WS, but request-response style)
+        from backend.src.providers.stt.sarvam_stt_streaming import SarvamStreamingSTTSession
+        stt_session = SarvamStreamingSTTSession(stt_config)
+
+        try:
+            transcript = await stt_session.transcribe_wav(audio_bytes, sample_rate=16000)
+        except Exception as e:
+            logger.error(f"[WS /voice/sarvam] STT error: {e}")
+            return
+
+        if not transcript or not transcript.strip():
+            logger.debug(f"[WS /voice/sarvam] Utterance #{utt_num}: no speech")
+            return
+
+        logger.info(f"[WS /voice/sarvam] Utterance #{utt_num}: \"{transcript}\"")
+        await websocket.send_json({"type": "transcript", "text": transcript})
+
+        # Intent classification
+        result = pipeline.intent_classifier.classify(transcript)
+        from backend.src.voice.intent import Intent
+        logger.info(
+            f"[WS /voice/sarvam] Intent: {result.intent.value} "
+            f"(conf={result.confidence:.2f})"
+        )
+
+        if result.intent == Intent.SCAN:
+            # Ask frontend to take a photo and send it back
+            await websocket.send_json({
+                "type": "intent",
+                "action": "scan",
+                "text": transcript,
+                "message": "Scanning now.",
+            })
+            # Immediately speak the ack while we wait for the photo
+            asyncio.create_task(stream_tts_response("Scanning now."))
+
+            # Wait for the photo from the frontend (up to 10s)
+            try:
+                frame_msg = await asyncio.wait_for(scan_queue.get(), timeout=10.0)
+                import base64 as b64
+                import cv2
+                import numpy as np
+                frame_bytes = b64.b64decode(frame_msg)
+                nparr = np.frombuffer(frame_bytes, np.uint8)
+                frame = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+                if frame is not None:
+                    scan_start = time.perf_counter()
+                    scan_result = await pipeline.process_frame(frame, force=True)
+                    scan_ms = (time.perf_counter() - scan_start) * 1000
+                    logger.info(
+                        f"[WS /voice/sarvam] Scan complete in {scan_ms:.0f}ms, "
+                        f"tts_len={len(scan_result.tts_text)}"
+                    )
+                    await websocket.send_json({
+                        "type": "scan_result",
+                        **scan_result.to_dict(),
+                    })
+                    if scan_result.tts_text:
+                        await stream_tts_response(scan_result.tts_text)
+                else:
+                    logger.warning("[WS /voice/sarvam] Could not decode scan frame")
+            except asyncio.TimeoutError:
+                logger.warning("[WS /voice/sarvam] Scan: no frame received within 10s")
+
+        elif result.intent == Intent.START_CONTINUOUS:
+            dispatch = await pipeline._dispatch_intent(result)
+            await websocket.send_json({"type": "intent", **dispatch})
+            await stream_tts_response(dispatch.get("message", ""))
+
+        elif result.intent == Intent.STOP_CONTINUOUS:
+            dispatch = await pipeline._dispatch_intent(result)
+            await websocket.send_json({"type": "intent", **dispatch})
+            await stream_tts_response(dispatch.get("message", ""))
+
+        elif result.intent == Intent.SWITCH_MODE:
+            dispatch = await pipeline._dispatch_intent(result)
+            await websocket.send_json({"type": "intent", **dispatch})
+            await stream_tts_response(dispatch.get("message", ""))
+
+        elif result.intent == Intent.REPEAT:
+            dispatch = await pipeline._dispatch_intent(result)
+            await websocket.send_json({"type": "intent", **dispatch})
+            if dispatch.get("tts_text"):
+                await stream_tts_response(dispatch["tts_text"])
+
+        elif result.intent == Intent.FOLLOW_UP:
+            dispatch = await pipeline._dispatch_intent(result)
+            await websocket.send_json({"type": "intent", **dispatch})
+            if dispatch.get("tts_text"):
+                await stream_tts_response(dispatch["tts_text"])
+
+        else:
+            # Unrecognized — if we have context, treat as follow-up
+            if pipeline._last_analysis:
+                dispatch = await pipeline._handle_follow_up(transcript)
+                await websocket.send_json({"type": "intent", **dispatch})
+                if dispatch.get("tts_text"):
+                    await stream_tts_response(dispatch["tts_text"])
+            else:
+                await websocket.send_json({
+                    "type": "intent",
+                    "action": "unknown",
+                    "text": transcript,
+                    "message": "Command not recognized",
+                })
+
+    try:
+        import json as _json
+        while True:
+            data = await websocket.receive()
+
+            # ── Client disconnected ───────────────────────────────────────────
+            if data.get("type") == "websocket.disconnect":
+                break
+
+            # ── Binary = WAV audio chunk from mic ────────────────────────────
+            if "bytes" in data and data["bytes"]:
+                audio_buffer.append(data["bytes"])
+
+            # ── Text = control commands ───────────────────────────────────────
+            elif "text" in data and data["text"]:
+                try:
+                    cmd = _json.loads(data["text"])
+                except _json.JSONDecodeError:
+                    continue
+
+                action = cmd.get("action", "")
+
+                if action == "flush":
+                    # User stopped speaking — process accumulated audio
+                    if audio_buffer:
+                        combined = b"".join(audio_buffer)
+                        audio_buffer.clear()
+                        # Fire-and-forget so we can keep receiving
+                        asyncio.create_task(process_utterance(combined))
+
+                elif action == "scan_frame":
+                    # Frontend took a photo in response to our scan intent
+                    frame_b64 = cmd.get("frame_b64", "")
+                    if frame_b64:
+                        await scan_queue.put(frame_b64)
+                        logger.info("[WS /voice/sarvam] 📸 Scan frame received from frontend")
+
+                elif action == "ping":
+                    await websocket.send_json({"type": "pong", "timestamp": time.time()})
+
+                elif action == "reset":
+                    audio_buffer.clear()
+                    pipeline.state_tracker.reset()
+                    await websocket.send_json({"type": "reset_ok"})
+
+    except WebSocketDisconnect:
+        pass  # Normal disconnect
+    except RuntimeError as e:
+        # Starlette raises RuntimeError if receive/send called after disconnect
+        if "disconnect" not in str(e).lower():
+            logger.error(f"[WS /voice/sarvam] RuntimeError: {e}", exc_info=True)
+    except Exception as e:
+        logger.error(f"[WS /voice/sarvam] ❌ Unhandled error: {e}", exc_info=True)
+        try:
+            await websocket.close(code=1011)
+        except Exception:
+            pass
+
+    elapsed = time.time() - session_start
+    logger.info(
+        f"[WS /voice/sarvam] 🔴 Session ended after {elapsed:.1f}s, "
+        f"utterances={total_utterances}"
+    )
+
+
 
 
 # ── WebSocket (Voice Streaming with VAD) ──

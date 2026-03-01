@@ -7,7 +7,7 @@ Swapping providers requires zero code changes — just update config.yml.
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from typing import AsyncIterator, Union
+from typing import AsyncIterator, Sequence, Union
 
 
 class BaseLLM(ABC):
@@ -17,8 +17,13 @@ class BaseLLM(ABC):
         self.config = config
 
     @abstractmethod
-    async def analyze_image(self, image: bytes, prompt: str) -> dict:
-        """Analyze an image with a mode-specific prompt. Returns structured JSON."""
+    async def analyze_image(self, image: bytes | list[bytes], prompt: str) -> dict:
+        """Analyze one or more images with a mode-specific prompt. Returns structured JSON.
+
+        Args:
+            image: Single JPEG bytes or a list of JPEG bytes (multi-frame capture).
+            prompt: Mode-specific system prompt.
+        """
         ...
 
     @abstractmethod

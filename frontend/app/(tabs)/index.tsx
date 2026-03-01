@@ -8,15 +8,16 @@ import {
   ActivityIndicator,
   SafeAreaView,
   Dimensions,
+  LayoutAnimation,
 } from "react-native";
 import { CameraView, useCameraPermissions } from "expo-camera";
 import { Audio } from "expo-av";
 import api, { type ScanResult, type Detection } from "@/services/api";
 import scanEvents, { type ScanCommand } from "@/services/scanEvents";
-import voiceStream, { type VoiceStreamStatus } from "@/services/voiceStream";
+import voiceStream, { type VoiceStreamStatus, registerCamera, unregisterCamera } from "@/services/voiceStream";
 
-const { width: SCREEN_WIDTH } = Dimensions.get("window");
-const CAMERA_HEIGHT = 450;
+const { width: SCREEN_WIDTH, height: SCREEN_HEIGHT } = Dimensions.get("window");
+const CAMERA_HEIGHT = 600;
 
 export default function ScannerScreen() {
   const [permission, requestPermission] = useCameraPermissions();
@@ -43,6 +44,9 @@ export default function ScannerScreen() {
   useEffect(() => {
     if (!permission?.granted) return;
 
+    // Register camera so voiceStream can take photos for scan commands
+    registerCamera(cameraRef);
+
     // Start the voice stream service
     voiceStream.start();
 
@@ -56,28 +60,64 @@ export default function ScannerScreen() {
 
     return () => {
       unsub();
+      unregisterCamera();
       voiceStream.stop();
     };
   }, [permission?.granted]);
 
-  // ── Single scan ──
-  const performScan = useCallback(async (skipTracked: boolean = false) => {
-    if (!cameraRef.current || isScanningRef.current) return;
-
-    isScanningRef.current = true;
-    setScanning(true);
-    const start = Date.now();
-
+  // ── Helper: take a single photo ──
+  const takePhoto = useCallback(async (): Promise<string | null> => {
+    if (!cameraRef.current) return null;
     try {
       const photo = await cameraRef.current.takePictureAsync({
         quality: 0.7,
         base64: false,
       });
+      return photo?.uri || null;
+    } catch {
+      return null;
+    }
+  }, []);
 
-      if (!photo?.uri) return;
+  // ── Dual-frame scan: capture 2 pics at 1s interval ──
+  const performScan = useCallback(async (skipTracked: boolean = false) => {
+    if (!cameraRef.current || isScanningRef.current) return;
 
-      // First, get JSON result for detections and bounding boxes
-      const data = await api.scanFromUri(photo.uri);
+    isScanningRef.current = true;
+    setScanning(true);
+    setStatusText("Capturing frame 1 of 2...");
+    const start = Date.now();
+
+    try {
+      // Frame 1: take immediately
+      const uri1 = await takePhoto();
+      if (!uri1) {
+        setStatusText("Failed to capture — try again");
+        return;
+      }
+
+      // Wait 1 second
+      setStatusText("Capturing frame 2 of 2...");
+      await new Promise((resolve) => setTimeout(resolve, 1000));
+
+      // Frame 2: take after 1s delay
+      const uri2 = await takePhoto();
+      if (!uri2) {
+        // Fallback: send only frame 1 if second capture fails
+        setStatusText("Analyzing single frame...");
+        const data = await api.scanFromUri(uri1);
+        LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
+        setResult(data);
+        setLatency(Date.now() - start);
+        if (data.mode) setMode(data.mode as "medical" | "retail");
+        return;
+      }
+
+      // Send both frames to backend
+      setStatusText("Analyzing 2 frames...");
+      const data = await api.scanMultipleFromUri([uri1, uri2]);
+
+      LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
       setResult(data);
       setLatency(Date.now() - start);
       if (data.mode) setMode(data.mode as "medical" | "retail");
@@ -132,12 +172,13 @@ export default function ScannerScreen() {
       console.error("Scan error:", err);
       setStatusText("Scan failed — try again");
     } finally {
+      LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
       setScanning(false);
       isScanningRef.current = false;
     }
-  }, []);
+  }, [takePhoto]);
 
-  // ── Continuous scanning (every ~750ms ≈ 15-20 frames at 30fps) ──
+  // ── Continuous scanning (every ~3s to account for dual-frame 1s capture) ──
   const startContinuous = useCallback(() => {
     setScanState("continuous");
     setStatusText('Continuous scanning... Say "scan stop"');
@@ -146,7 +187,7 @@ export default function ScannerScreen() {
     if (continuousTimerRef.current) clearInterval(continuousTimerRef.current);
     continuousTimerRef.current = setInterval(() => {
       performScan(true); // skip already-tracked objects
-    }, 750);
+    }, 3000);
   }, [performScan]);
 
   const stopContinuous = useCallback(() => {
@@ -417,35 +458,76 @@ export default function ScannerScreen() {
             {/* Analysis Detail */}
             {result.analysis &&
               !result.analysis.error &&
-              Object.keys(result.analysis).length > 0 && (
-                <View style={styles.analysisBox}>
-                  <Text style={styles.analysisTitle}>📋 Detailed Analysis</Text>
-                  {Object.entries(result.analysis).map(([key, val]) => {
-                    if (key === "confidence" || key === "raw_text_detected")
-                      return null;
-                    if (val && typeof val === "object") {
-                      return Object.entries(val as Record<string, any>).map(
-                        ([k, v]) =>
-                          v ? (
-                            <Text
-                              key={`${key}.${k}`}
-                              style={styles.analysisLine}
-                            >
-                              <Text style={styles.analysisKey}>{k}: </Text>
-                              {String(v)}
-                            </Text>
-                          ) : null,
+              Object.keys(result.analysis).length > 0 && (() => {
+                // Skip these noisy/internal keys
+                const SKIP_KEYS = new Set(["confidence", "raw_text_detected", "parse_error"]);
+
+                const renderValue = (val: any): string => {
+                  if (val == null || val === "" || val === false) return "";
+                  if (typeof val === "string" || typeof val === "number" || typeof val === "boolean") {
+                    return String(val);
+                  }
+                  if (Array.isArray(val)) {
+                    // Array of primitives → comma-joined; array of objects → name/description fields
+                    return val
+                      .map((item: any) => {
+                        if (item == null) return "";
+                        if (typeof item !== "object") return String(item);
+                        // For object items, pick meaningful display fields
+                        const label =
+                          item.name || item.brand || item.class_name || item.description || "";
+                        const color = item.color ? `${item.color} ` : "";
+                        const category = item.category ? ` (${item.category})` : "";
+                        return label ? `${color}${label}${category}` : JSON.stringify(item);
+                      })
+                      .filter(Boolean)
+                      .join(", ");
+                  }
+                  // Plain object → key: value pairs
+                  return Object.entries(val)
+                    .filter(([, v]) => v != null && v !== "" && v !== false)
+                    .map(([k, v]) => `${k}: ${v}`)
+                    .join(", ");
+                };
+
+                const lines: React.ReactNode[] = [];
+                for (const [key, val] of Object.entries(result.analysis)) {
+                  if (SKIP_KEYS.has(key)) continue;
+                  if (val == null || val === "" || val === false) continue;
+
+                  if (val && typeof val === "object" && !Array.isArray(val)) {
+                    // Nested object → render each sub-key as its own line
+                    for (const [k, v] of Object.entries(val as Record<string, any>)) {
+                      const rendered = renderValue(v);
+                      if (!rendered) continue;
+                      lines.push(
+                        <Text key={`${key}.${k}`} style={styles.analysisLine}>
+                          <Text style={styles.analysisKey}>{k}: </Text>
+                          {rendered}
+                        </Text>
                       );
                     }
-                    return val ? (
+                  } else {
+                    const rendered = renderValue(val);
+                    if (!rendered) continue;
+                    lines.push(
                       <Text key={key} style={styles.analysisLine}>
                         <Text style={styles.analysisKey}>{key}: </Text>
-                        {String(val)}
+                        {rendered}
                       </Text>
-                    ) : null;
-                  })}
-                </View>
-              )}
+                    );
+                  }
+                }
+
+                if (lines.length === 0) return null;
+                return (
+                  <View style={styles.analysisBox}>
+                    <Text style={styles.analysisTitle}>📋 Detailed Analysis</Text>
+                    {lines}
+                  </View>
+                );
+              })()
+            }
           </>
         ) : (
           <Text style={styles.placeholder}>

@@ -1,93 +1,95 @@
 /**
- * App-wide always-on voice command service.
+ * voiceStream.ts — Sarvam WebSocket Streaming Voice Service (v2)
  *
- * Uses a rapid record-cycle approach:
- *   1. Record a short ~2s audio clip
- *   2. Client-side VAD filters out silence/noise
- *   3. Send speech clips to backend /voice/listen endpoint
- *   4. Backend does STT + intent classification
- *   5. If a command is detected, emit it via scanEvents
- *   6. Immediately start the next recording cycle
+ * Architecture:
+ *   Phone mic (WAV 16kHz) → /voice/sarvam WS → Sarvam STT WS (saaras:v3)
+ *   → Intent classify → Vision LLM (if scan)
+ *   → Sarvam TTS WS (bulbul:v3) → MP3 chunks → Phone speaker
  *
- * Key improvements over v1:
- *  - Rolling adaptive noise floor (recalibrates every ~30 cycles)
- *  - Percentile-based floor estimation (immune to transient spikes)
- *  - TTS mute window — suppresses VAD while the app is speaking
- *  - Threshold is computed relative to the ACTUAL noise floor, not a fixed -25dB clamp
+ * Key improvements over v1 (REST /voice/listen polling):
+ *  - True streaming: first audio byte from TTS arrives ~200ms after speech ends
+ *  - No polling loop — single persistent WebSocket handles everything
+ *  - Sarvam saaras:v3 STT: much higher accuracy than saarika:v2.5
+ *  - TTS audio arrives as MP3 chunks streamed directly over the same WS
+ *  - Photo for scan is taken on frontend and sent as base64 over the WS
+ *
+ * Protocol (client → server):
+ *   binary:               WAV audio chunk bytes (accumulates until flush)
+ *   {"action":"flush"}    User stopped speaking — process accumulated audio
+ *   {"action":"ping"}     Keepalive
+ *   {"action":"scan_frame","frame_b64":"..."}  JPEG frame for vision scan
+ *   {"action":"reset"}    Reset session state
+ *
+ * Protocol (server → client):
+ *   {"type":"transcript","text":"..."}    Live STT result
+ *   {"type":"intent","action":"..."}      Classified intent
+ *   {"type":"scan_result",...}            Vision scan result
+ *   binary:                               MP3 TTS audio chunks (play immediately)
+ *   {"type":"tts_done"}                   End of TTS audio
+ *   {"type":"pong"}                       Keepalive response
  */
 
 import { Audio } from "expo-av";
+import { CameraView } from "expo-camera";
 import scanEvents from "./scanEvents";
-import { API_BASE } from "./api";
+import { SARVAM_WS_URL, API_BASE } from "./api";
 
 // ─── Tunables ────────────────────────────────────────────────────────────────
 
-/** Duration of each listen cycle (ms). */
-const LISTEN_CYCLE_MS = 2000;
+/** How long each recording cycle lasts (ms). VAD decides whether to send. */
+const LISTEN_CYCLE_MS = 1800;
 
-/** Duration of the calibration cycle (ms). Longer = more stable noise floor. */
-const CALIBRATION_CYCLE_MS = 3000;
+/** Calibration cycle duration — measure noise floor once on start. */
+const CALIBRATION_CYCLE_MS = 2500;
 
-/** Minimum clip length before we bother sending to the backend (ms). */
-const MIN_AUDIO_MS = 400;
+/** Speech must be above noise floor by this margin to trigger a flush. */
+const SPEECH_MARGIN_DB = 14;
 
-/**
- * How many dB above the noise floor counts as "speech".
- * A larger margin means fewer false positives but may miss soft voices.
- */
-const SPEECH_MARGIN_DB = 15;
-
-/**
- * Absolute minimum threshold regardless of noise floor.
- * Prevents triggering on truly inaudible sounds in a very quiet room.
- * e.g. noise floor -49 dB → threshold = -49 + 15 = -34 dB (not clamped to -25)
- */
-const ABSOLUTE_MIN_THRESHOLD_DB = -40;
-
-/**
- * Absolute maximum threshold.
- * Prevents the bar being set so high that normal speech is ignored in a loud room.
- */
+/** Absolute bounds for the computed speech threshold (dB). */
+const ABSOLUTE_MIN_THRESHOLD_DB = -42;
 const ABSOLUTE_MAX_THRESHOLD_DB = -10;
 
-/**
- * Recalibrate (run a silent calibration cycle) every N active cycles.
- * Keeps the noise floor fresh as environment changes.
- */
-const RECALIBRATE_EVERY_N_CYCLES = 40;
+/** Re-calibrate every N active cycles. */
+const RECALIBRATE_EVERY_N_CYCLES = 50;
 
-/**
- * Percentile of metering samples used to estimate the noise floor.
- * 85th percentile of a SILENT cycle is a robust noise floor estimate —
- * it catches occasional transient bumps without being thrown off by outliers.
- */
+/** Noise floor percentile (to exclude transient spikes during calibration). */
 const NOISE_FLOOR_PERCENTILE = 0.85;
 
-/**
- * After TTS finishes, suppress VAD for this many ms to let the mic settle
- * and avoid the app hearing its own voice.
- */
+/** Suppress VAD for this long after TTS finishes (ms). */
 const TTS_MUTE_TAIL_MS = 1200;
 
-// ─── Recording options ────────────────────────────────────────────────────────
+/** WebSocket reconnect: base & max delays (ms). */
+const RECONNECT_BASE_MS = 1500;
+const RECONNECT_MAX_MS = 20000;
 
-const LISTEN_RECORDING_OPTIONS: Audio.RecordingOptions = {
+/** Keepalive ping interval (ms). */
+const PING_INTERVAL_MS = 20000;
+
+/** Minimum recorded clip length to bother flushing (ms). */
+const MIN_CLIP_MS = 300;
+
+// ─── Recording options (WAV preferred for Sarvam streaming STT) ──────────────
+// NOTE: Sarvam streaming STT only accepts WAV or raw PCM.
+// Expo on Android records M4A/AAC natively, so we use WAV on iOS and M4A on Android.
+// The backend handles format detection via magic bytes.
+
+const RECORDING_OPTIONS: Audio.RecordingOptions = {
     isMeteringEnabled: true,
     android: {
         extension: ".m4a",
-        outputFormat: 2,  // MPEG_4
-        audioEncoder: 3,  // AAC
+        outputFormat: 2,   // MPEG_4
+        audioEncoder: 3,   // AAC
         sampleRate: 16000,
         numberOfChannels: 1,
         bitRate: 64000,
     },
     ios: {
-        extension: ".m4a",
-        outputFormat: "applelossless" as any,
-        audioQuality: 96,
+        extension: ".wav",
+        outputFormat: "lpcm" as any, // Linear PCM = WAV
+        audioQuality: 96,            // MEDIUM
         sampleRate: 16000,
         numberOfChannels: 1,
-        bitRate: 64000,
+        bitRate: 256000,
         linearPCMBitDepth: 16,
         linearPCMIsBigEndian: false,
         linearPCMIsFloat: false,
@@ -103,6 +105,17 @@ const LISTEN_RECORDING_OPTIONS: Audio.RecordingOptions = {
 export type VoiceStreamStatus = "idle" | "listening" | "processing" | "error";
 type StatusListener = (status: VoiceStreamStatus, detail?: string) => void;
 
+/** Camera ref injected by the scan screen so we can take photos on demand. */
+let _cameraRef: React.RefObject<CameraView | null> | null = null;
+
+export function registerCamera(ref: React.RefObject<CameraView | null>) {
+    _cameraRef = ref;
+}
+
+export function unregisterCamera() {
+    _cameraRef = null;
+}
+
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
 function percentile(sortedArr: number[], p: number): number {
@@ -111,12 +124,27 @@ function percentile(sortedArr: number[], p: number): number {
     return sortedArr[Math.min(idx, sortedArr.length - 1)];
 }
 
+/** Read a file URI and return Uint8Array bytes (React Native compatible). */
+async function readFileBytes(uri: string): Promise<Uint8Array> {
+    const res = await fetch(uri);
+    const buf = await res.arrayBuffer();
+    return new Uint8Array(buf);
+}
+
 // ─── Service ──────────────────────────────────────────────────────────────────
 
 class VoiceStreamService {
     private running = false;
     private currentRecording: Audio.Recording | null = null;
     private cycleTimer: ReturnType<typeof setTimeout> | null = null;
+    private pingTimer: ReturnType<typeof setInterval> | null = null;
+    private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+    private reconnectAttempt = 0;
+    private intentionalClose = false;
+
+    private ws: WebSocket | null = null;
+    private wsReady = false;
+
     private statusListeners = new Set<StatusListener>();
     private _status: VoiceStreamStatus = "idle";
     private permissionGranted = false;
@@ -124,16 +152,16 @@ class VoiceStreamService {
     // Cycle bookkeeping
     private cycleCount = 0;
     private isCalibrating = false;
-
-    // Noise floor — starts pessimistically high so we don't fire before calibration
     private noiseFloor = -30;
     private noiseFloorReady = false;
-
-    // Per-cycle metering
     private meteringSamples: number[] = [];
 
-    // TTS mute window — set this timestamp when TTS starts/ends
+    // TTS mute window
     private ttsMuteUntil = 0;
+
+    // Pending TTS audio chunks — collect until tts_done, then play
+    private ttsBuffer: Uint8Array[] = [];
+    private ttsPlaying = false;
 
     // ── Public API ────────────────────────────────────────────────────────────
 
@@ -146,38 +174,22 @@ class VoiceStreamService {
         return () => this.statusListeners.delete(listener);
     }
 
-    /**
-     * Call this right before the app plays TTS audio.
-     * VAD will be suppressed until `ttsMuteUntil` expires.
-     */
     notifyTtsStart(estimatedDurationMs: number) {
         this.ttsMuteUntil = Date.now() + estimatedDurationMs + TTS_MUTE_TAIL_MS;
-        console.log(
-            `[VoiceStream] 🔇 TTS mute active for ~${Math.round((estimatedDurationMs + TTS_MUTE_TAIL_MS) / 1000)}s`
-        );
     }
 
-    /**
-     * Call this when TTS audio finishes playing (use the tail as extra buffer).
-     */
     notifyTtsEnd() {
         this.ttsMuteUntil = Date.now() + TTS_MUTE_TAIL_MS;
-        console.log(`[VoiceStream] 🔇 TTS finished — mute tail ${TTS_MUTE_TAIL_MS}ms`);
     }
 
-    /** Start always-on voice listening. */
+    /** Start always-on voice listening via Sarvam WS pipeline. */
     async start() {
-        if (this.running) {
-            console.log("[VoiceStream] Already running, ignoring start()");
-            return;
-        }
-
-        console.log("[VoiceStream] Starting always-on voice listening...");
+        if (this.running) return;
+        console.log("[VoiceStream] 🚀 Starting Sarvam WebSocket voice pipeline...");
 
         if (!this.permissionGranted) {
             const { granted } = await Audio.requestPermissionsAsync();
             if (!granted) {
-                console.warn("[VoiceStream] Microphone permission denied");
                 this.setStatus("error", "Microphone permission denied");
                 return;
             }
@@ -190,51 +202,266 @@ class VoiceStreamService {
         });
 
         this.running = true;
+        this.intentionalClose = false;
         this.cycleCount = 0;
         this.noiseFloorReady = false;
         this.isCalibrating = true;
 
+        this.connectWS();
         this.setStatus("listening");
         this.startCycle();
     }
 
     /** Stop voice listening completely. */
     async stop() {
-        console.log("[VoiceStream] Stopping voice listening...");
+        console.log("[VoiceStream] ⏹ Stopping...");
         this.running = false;
+        this.intentionalClose = true;
 
-        if (this.cycleTimer) {
-            clearTimeout(this.cycleTimer);
-            this.cycleTimer = null;
-        }
+        this.clearTimers();
 
         if (this.currentRecording) {
-            try { await this.currentRecording.stopAndUnloadAsync(); } catch { /* ignore */ }
+            try { await this.currentRecording.stopAndUnloadAsync(); } catch { }
             this.currentRecording = null;
+        }
+
+        if (this.ws) {
+            this.ws.close();
+            this.ws = null;
         }
 
         this.setStatus("idle");
     }
 
-    // ── Internal ──────────────────────────────────────────────────────────────
+    // ── WebSocket ─────────────────────────────────────────────────────────────
 
-    private setStatus(status: VoiceStreamStatus, detail?: string) {
-        this._status = status;
-        this.statusListeners.forEach((fn) => fn(status, detail));
+    private connectWS() {
+        if (this.ws?.readyState === WebSocket.OPEN) return;
+
+        console.log(`[VoiceStream] WS connecting to ${SARVAM_WS_URL}...`);
+        const ws = new WebSocket(SARVAM_WS_URL);
+        ws.binaryType = "arraybuffer";
+
+        ws.onopen = () => {
+            console.log("[VoiceStream] ✅ WS connected to /voice/sarvam");
+            this.wsReady = true;
+            this.reconnectAttempt = 0;
+            this.startPing();
+        };
+
+        ws.onmessage = (event) => this.handleWSMessage(event);
+
+        ws.onerror = (err) => {
+            console.warn("[VoiceStream] WS error:", err);
+            this.wsReady = false;
+        };
+
+        ws.onclose = (event) => {
+            console.log(`[VoiceStream] WS closed (code=${event?.code})`);
+            this.wsReady = false;
+            this.stopPing();
+            if (!this.intentionalClose && this.running) {
+                this.scheduleReconnect();
+            }
+        };
+
+        this.ws = ws;
     }
+
+    private scheduleReconnect() {
+        const delay = Math.min(
+            RECONNECT_BASE_MS * Math.pow(1.5, this.reconnectAttempt),
+            RECONNECT_MAX_MS,
+        );
+        this.reconnectAttempt++;
+        console.log(`[VoiceStream] Reconnecting in ${(delay / 1000).toFixed(1)}s (attempt ${this.reconnectAttempt})`);
+        this.reconnectTimer = setTimeout(() => this.connectWS(), delay);
+    }
+
+    private startPing() {
+        this.stopPing();
+        this.pingTimer = setInterval(() => {
+            if (this.ws?.readyState === WebSocket.OPEN) {
+                this.ws.send(JSON.stringify({ action: "ping" }));
+            }
+        }, PING_INTERVAL_MS);
+    }
+
+    private stopPing() {
+        if (this.pingTimer) {
+            clearInterval(this.pingTimer);
+            this.pingTimer = null;
+        }
+    }
+
+    private async handleWSMessage(event: MessageEvent) {
+        // Binary = TTS audio chunk
+        if (event.data instanceof ArrayBuffer) {
+            this.ttsBuffer.push(new Uint8Array(event.data));
+            return;
+        }
+
+        // Text = JSON control message
+        try {
+            const msg = JSON.parse(event.data as string);
+            const type = msg.type || "";
+
+            if (type === "tts_done") {
+                // All TTS chunks arrived — play them
+                if (this.ttsBuffer.length > 0) {
+                    const combined = this._concatBuffers(this.ttsBuffer);
+                    this.ttsBuffer = [];
+                    await this._playMp3(combined);
+                }
+                return;
+            }
+
+            if (type === "transcript") {
+                console.log(`[VoiceStream] 📝 Transcript: "${msg.text}"`);
+                return;
+            }
+
+            if (type === "intent") {
+                console.log(`[VoiceStream] 🎯 Intent: action=${msg.action}`);
+                this.handleIntent(msg);
+                return;
+            }
+
+            if (type === "scan_result") {
+                console.log(`[VoiceStream] 📸 Scan result: ${msg.detections?.length || 0} dets`);
+                // The scan result TTS comes as a separate TTS audio stream
+                return;
+            }
+
+            if (type === "pong") {
+                return; // keepalive OK
+            }
+
+            console.log("[VoiceStream] WS msg:", msg);
+        } catch (e) {
+            console.warn("[VoiceStream] WS parse error:", e);
+        }
+    }
+
+    private handleIntent(msg: any) {
+        switch (msg.action) {
+            case "scan":
+                // Server wants a photo — take it and send frame_b64
+                scanEvents.emit("scan"); // Trigger UI feedback
+                this._takeAndSendPhoto();
+                break;
+            case "start_continuous":
+                scanEvents.emit("scan_continue");
+                break;
+            case "stop_continuous":
+                scanEvents.emit("scan_stop");
+                break;
+            case "switch_mode":
+                console.log(`[VoiceStream] Mode switch to: ${msg.mode}`);
+                break;
+            case "follow_up":
+            case "repeat":
+                // TTS response comes as binary audio — already handled in handleWSMessage
+                break;
+            default:
+                console.log(`[VoiceStream] Unhandled intent: ${msg.action}`);
+        }
+    }
+
+    /** Take a photo using the registered camera and send it to the backend. */
+    private async _takeAndSendPhoto() {
+        if (!_cameraRef?.current) {
+            console.warn("[VoiceStream] No camera registered — cannot send scan frame");
+            return;
+        }
+        try {
+            const photo = await _cameraRef.current.takePictureAsync({
+                quality: 0.7,
+                base64: true,
+            });
+            if (!photo?.base64) {
+                console.warn("[VoiceStream] Photo capture returned no base64");
+                return;
+            }
+            if (this.ws?.readyState === WebSocket.OPEN) {
+                this.ws.send(JSON.stringify({
+                    action: "scan_frame",
+                    frame_b64: photo.base64,
+                }));
+                console.log(`[VoiceStream] 📸 Sent scan frame (${photo.base64.length} chars)`);
+            }
+        } catch (e) {
+            console.error("[VoiceStream] Photo capture error:", e);
+        }
+    }
+
+    /** Concatenate Uint8Array chunks into one. */
+    private _concatBuffers(chunks: Uint8Array[]): Uint8Array {
+        const total = chunks.reduce((acc, c) => acc + c.length, 0);
+        const out = new Uint8Array(total);
+        let offset = 0;
+        for (const c of chunks) {
+            out.set(c, offset);
+            offset += c.length;
+        }
+        return out;
+    }
+
+    /** Play MP3 bytes using expo-av. */
+    private async _playMp3(mp3Bytes: Uint8Array) {
+        if (this.ttsPlaying) return; // Prevent overlap
+        this.ttsPlaying = true;
+
+        // Estimate duration for mute window (~150 bytes/ms at 128kbps)
+        const estDurationMs = Math.max(500, mp3Bytes.length / 16);
+        this.ttsMuteUntil = Date.now() + estDurationMs + TTS_MUTE_TAIL_MS;
+
+        try {
+            // Convert Uint8Array to base64
+            let binary = "";
+            const bytes = mp3Bytes;
+            for (let i = 0; i < bytes.byteLength; i++) {
+                binary += String.fromCharCode(bytes[i]);
+            }
+            const base64 = btoa(binary);
+
+            const { sound } = await Audio.Sound.createAsync(
+                { uri: `data:audio/mpeg;base64,${base64}` },
+                { shouldPlay: true },
+            );
+
+            await new Promise<void>((resolve) => {
+                sound.setOnPlaybackStatusUpdate((status) => {
+                    if (status.isLoaded && status.didJustFinish) {
+                        resolve();
+                    }
+                });
+                // Fallback timeout in case callback doesn't fire
+                setTimeout(resolve, estDurationMs + 3000);
+            });
+
+            await sound.unloadAsync().catch(() => { });
+        } catch (e) {
+            console.warn("[VoiceStream] TTS playback error:", e);
+        } finally {
+            this.ttsPlaying = false;
+            this.ttsMuteUntil = Date.now() + TTS_MUTE_TAIL_MS;
+        }
+    }
+
+    // ── Recording cycle (client-side VAD → WS flush) ─────────────────────────
 
     private async startCycle() {
         if (!this.running) return;
 
         try {
             if (this.currentRecording) {
-                try { await this.currentRecording.stopAndUnloadAsync(); } catch { /* ignore */ }
+                try { await this.currentRecording.stopAndUnloadAsync(); } catch { }
                 this.currentRecording = null;
             }
 
             this.meteringSamples = [];
-
-            const { recording } = await Audio.Recording.createAsync(LISTEN_RECORDING_OPTIONS);
+            const { recording } = await Audio.Recording.createAsync(RECORDING_OPTIONS);
             this.currentRecording = recording;
             this.cycleCount++;
 
@@ -248,24 +475,19 @@ class VoiceStreamService {
             const duration = this.isCalibrating ? CALIBRATION_CYCLE_MS : LISTEN_CYCLE_MS;
 
             if (this.isCalibrating) {
-                console.log(`[VoiceStream] 🎧 Calibrating noise floor — please be quiet...`);
-            } else if (this.cycleCount % 10 === 1) {
-                console.log(
-                    `[VoiceStream] Cycle #${this.cycleCount} | Noise floor: ${this.noiseFloor.toFixed(1)} dB | ` +
-                    `Threshold: ${this.computeThreshold().toFixed(1)} dB`
-                );
+                console.log("[VoiceStream] 🎧 Calibrating noise floor...");
             }
 
-            this.cycleTimer = setTimeout(() => this.endCycleAndSend(), duration);
+            this.cycleTimer = setTimeout(() => this.endCycleAndFlush(), duration);
         } catch (err) {
-            console.error("[VoiceStream] Error starting recording cycle:", err);
+            console.error("[VoiceStream] Cycle start error:", err);
             if (this.running) {
                 this.cycleTimer = setTimeout(() => this.startCycle(), 1000);
             }
         }
     }
 
-    private async endCycleAndSend() {
+    private async endCycleAndFlush() {
         if (!this.running || !this.currentRecording) {
             if (this.running) this.startCycle();
             return;
@@ -281,102 +503,78 @@ class VoiceStreamService {
             await this.currentRecording.stopAndUnloadAsync();
             uri = this.currentRecording.getURI();
             this.currentRecording = null;
-        } catch (err) {
-            console.warn("[VoiceStream] Error stopping recording:", err);
+        } catch {
             this.currentRecording = null;
         }
 
-        // ── Calibration cycle ────────────────────────────────────────────────
+        // ── Calibration cycle ──────────────────────────────────────────────────
         if (this.isCalibrating) {
             this.updateNoiseFloor(samples);
             this.isCalibrating = false;
             this.noiseFloorReady = true;
             console.log(
-                `[VoiceStream] ✅ Calibration done — noise floor: ${this.noiseFloor.toFixed(1)} dB, ` +
-                `speech threshold: ${this.computeThreshold().toFixed(1)} dB`
+                `[VoiceStream] ✅ Calibrated: floor=${this.noiseFloor.toFixed(1)}dB, ` +
+                `threshold=${this.computeThreshold().toFixed(1)}dB`
             );
             if (this.running) this.startCycle();
             return;
         }
 
-        // Kick off the next cycle immediately (fire-and-forget the send below)
+        // Start next cycle immediately (fire-and-forget send)
         if (this.running) this.startCycle();
 
-        // ── Periodic recalibration ────────────────────────────────────────────
+        // Periodic recalibration
         if (this.cycleCount % RECALIBRATE_EVERY_N_CYCLES === 0) {
-            console.log(`[VoiceStream] 🔄 Triggering periodic recalibration...`);
             this.isCalibrating = true;
-            // (the NEXT cycle will be a calibration cycle)
         }
 
-        // ── TTS mute window ───────────────────────────────────────────────────
+        // TTS mute window — drop audio while speaking
         if (Date.now() < this.ttsMuteUntil) {
-            console.log(`[VoiceStream] 🔇 Dropping clip — TTS mute active`);
             return;
         }
 
-        // ── Client-side VAD ───────────────────────────────────────────────────
+        // Client-side VAD
         if (samples.length === 0) return;
-
         const maxDb = Math.max(...samples);
         const threshold = this.computeThreshold();
 
         if (maxDb < threshold) {
             if (this.cycleCount % 5 === 0) {
-                console.log(
-                    `[VoiceStream] 🤫 Quiet clip skipped (max: ${maxDb.toFixed(1)} dB < threshold: ${threshold.toFixed(1)} dB)`
-                );
+                console.log(`[VoiceStream] 🤫 Quiet (max=${maxDb.toFixed(1)}dB < ${threshold.toFixed(1)}dB)`);
             }
             return;
         }
 
-        console.log(
-            `[VoiceStream] 🗣️ Speech detected (max: ${maxDb.toFixed(1)} dB > threshold: ${threshold.toFixed(1)} dB)`
-        );
+        console.log(`[VoiceStream] 🗣️ Speech (max=${maxDb.toFixed(1)}dB > ${threshold.toFixed(1)}dB)`);
 
-        // ── Send to backend ───────────────────────────────────────────────────
-        if (uri && durationMs >= MIN_AUDIO_MS) {
-            this.sendToBackend(uri, durationMs);
+        // Send to backend via WebSocket
+        if (uri && durationMs >= MIN_CLIP_MS) {
+            await this.sendAudioViaWS(uri);
         }
     }
 
-    /**
-     * Compute the speech detection threshold from the current noise floor.
-     * Clamped to [ABSOLUTE_MIN, ABSOLUTE_MAX] to stay sane in extreme environments.
-     */
-    private computeThreshold(): number {
-        const raw = this.noiseFloor + SPEECH_MARGIN_DB;
-        return Math.min(
-            ABSOLUTE_MAX_THRESHOLD_DB,
-            Math.max(ABSOLUTE_MIN_THRESHOLD_DB, raw)
-        );
-    }
+    /** Read the recorded file and send it as binary over the WS, then flush. */
+    private async sendAudioViaWS(uri: string) {
+        if (!this.ws || !this.wsReady) {
+            console.warn("[VoiceStream] WS not ready — falling back to REST");
+            await this.sendToRestFallback(uri);
+            return;
+        }
 
-    /**
-     * Update the noise floor estimate from a set of metering samples.
-     * Uses a high percentile of the sorted samples so occasional door-slams
-     * or mic pops don't push the floor up unrealistically.
-     */
-    private updateNoiseFloor(samples: number[]) {
-        if (samples.length === 0) return;
-        const sorted = [...samples].sort((a, b) => a - b);
-        const estimate = percentile(sorted, NOISE_FLOOR_PERCENTILE);
-
-        if (!this.noiseFloorReady) {
-            // First calibration — take the estimate directly
-            this.noiseFloor = estimate;
-        } else {
-            // Subsequent recalibrations — blend with previous value (EMA α=0.4)
-            // so a single noisy recalibration doesn't wildly shift the threshold
-            this.noiseFloor = 0.6 * this.noiseFloor + 0.4 * estimate;
+        try {
+            const bytes = await readFileBytes(uri);
+            this.ws.send(bytes.buffer as ArrayBuffer);
+            this.ws.send(JSON.stringify({ action: "flush" }));
+            console.log(`[VoiceStream] 📤 Sent ${bytes.length} bytes + flush to WS`);
+        } catch (e) {
+            console.error("[VoiceStream] WS send error:", e);
+            // Try REST fallback
+            await this.sendToRestFallback(uri);
         }
     }
 
-    /**
-     * Send recorded audio to the backend /voice/listen endpoint.
-     * Fire-and-forget — does not block the next recording cycle.
-     */
-    private async sendToBackend(uri: string, durationMs: number) {
+    /** Fallback to the old REST /voice/listen endpoint when WS is unavailable. */
+    private async sendToRestFallback(uri: string) {
         try {
             const formData = new FormData();
             formData.append("audio", {
@@ -391,50 +589,54 @@ class VoiceStreamService {
                 headers: { "ngrok-skip-browser-warning": "true" },
             });
 
-            if (!response.ok) {
-                const text = await response.text().catch(() => "");
-                if (response.status !== 422) {
-                    // 422 = no speech, expected — don't spam the log
-                    console.warn(`[VoiceStream] Backend ${response.status}: ${text.slice(0, 200)}`);
-                }
-                return;
-            }
+            if (!response.ok) return;
 
             const data = await response.json();
             if (!data.has_command) return;
 
-            console.log(
-                `[VoiceStream] 🎙️ Command: action=${data.action}, text="${data.text ?? ""}"`
-            );
-            this.dispatchCommand(data);
-        } catch (err) {
-            if (this.cycleCount % 20 === 0) {
-                console.warn("[VoiceStream] Send error (periodic log):", err);
+            console.log(`[VoiceStream] 🎙️ REST fallback: action=${data.action}`);
+            switch (data.action) {
+                case "scan": scanEvents.emit("scan"); break;
+                case "start_continuous": scanEvents.emit("scan_continue"); break;
+                case "stop_continuous": scanEvents.emit("scan_stop"); break;
             }
+        } catch (e) {
+            console.warn("[VoiceStream] REST fallback error:", e);
         }
     }
 
-    /** Route a detected command to the appropriate event. */
-    private dispatchCommand(data: any) {
-        switch (data.action) {
-            case "scan":
-                console.log("[VoiceStream] → SCAN");
-                scanEvents.emit("scan");
-                break;
-            case "start_continuous":
-                console.log("[VoiceStream] → CONTINUOUS SCAN");
-                scanEvents.emit("scan_continue");
-                break;
-            case "stop_continuous":
-                console.log("[VoiceStream] → STOP");
-                scanEvents.emit("scan_stop");
-                break;
-            default:
-                console.log(`[VoiceStream] → Unhandled action: ${data.action}`);
+    // ── VAD helpers ───────────────────────────────────────────────────────────
+
+    private computeThreshold(): number {
+        const raw = this.noiseFloor + SPEECH_MARGIN_DB;
+        return Math.min(ABSOLUTE_MAX_THRESHOLD_DB, Math.max(ABSOLUTE_MIN_THRESHOLD_DB, raw));
+    }
+
+    private updateNoiseFloor(samples: number[]) {
+        if (samples.length === 0) return;
+        const sorted = [...samples].sort((a, b) => a - b);
+        const estimate = percentile(sorted, NOISE_FLOOR_PERCENTILE);
+        if (!this.noiseFloorReady) {
+            this.noiseFloor = estimate;
+        } else {
+            this.noiseFloor = 0.6 * this.noiseFloor + 0.4 * estimate;
         }
+    }
+
+    // ── Lifecycle ─────────────────────────────────────────────────────────────
+
+    private setStatus(status: VoiceStreamStatus, detail?: string) {
+        this._status = status;
+        this.statusListeners.forEach((fn) => fn(status, detail));
+    }
+
+    private clearTimers() {
+        if (this.cycleTimer) { clearTimeout(this.cycleTimer); this.cycleTimer = null; }
+        if (this.pingTimer) { clearInterval(this.pingTimer); this.pingTimer = null; }
+        if (this.reconnectTimer) { clearTimeout(this.reconnectTimer); this.reconnectTimer = null; }
     }
 }
 
-// Singleton — shared across the entire app
+// Singleton
 export const voiceStream = new VoiceStreamService();
 export default voiceStream;
