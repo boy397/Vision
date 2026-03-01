@@ -53,6 +53,7 @@ class STTConfig(BaseModel):
     provider: str = "google"
     google: STTProviderConfig = Field(default_factory=STTProviderConfig)
     sarvam: STTProviderConfig = Field(default_factory=STTProviderConfig)
+    funasr: STTProviderConfig = Field(default_factory=STTProviderConfig)
 
 
 class TTSProviderConfig(BaseModel):
